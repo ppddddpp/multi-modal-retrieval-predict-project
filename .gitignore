@@ -179,3 +179,11 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Local - project-self ignore
+data
+models
+
+step.txt
+structure.txt
+sanity_check_phase_1.ipynb
