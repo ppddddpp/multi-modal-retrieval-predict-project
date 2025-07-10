@@ -180,10 +180,24 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-# Local - project-self ignore
+# ---Local - project-self ignore---
+
+# Ignore large size folders 
 data
 models
+splited_data
 
+# Local information
 step.txt
 structure.txt
-sanity_check_phase_1.ipynb
+
+# Ignore EDA python notebooks which already have codes in .py 
+EDA_after_split.ipynb
+EDA_before_split.ipynb
+data_phrase_check.ipynb
+
+# Ignore additional files
+cudaCheck.ipynb
+wandb
+embeddings
+checkpoints

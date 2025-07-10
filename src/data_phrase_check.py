@@ -11,6 +11,7 @@ from fusion import Backbones
 from tensorDICOM import DICOMImagePreprocessor
 import pydicom
 import numpy as np
+from collections import Counter
 
 # Resolve paths...
 try:
@@ -22,6 +23,29 @@ XML_DIR    = BASE_DIR / 'data' / 'openi' / 'xml' / 'NLMCXR_reports' / 'ecgen-rad
 DICOM_ROOT = BASE_DIR / 'data' / 'openi' / 'dicom'
 MODEL_PLACE = BASE_DIR / "models"
 os.environ['TRANSFORMERS_CACHE'] = str(MODEL_PLACE)
+
+def analyze_label_distribution(records, label_names=None):
+    """
+    Count how often each label (from label vectors) appears in the dataset.
+    
+    Parameters
+    ----------
+    records : list of dicts
+        Each record must have a 'labels' field that is a 14-dim list
+    label_names : list of str
+        List of names for the labels (optional but recommended)
+
+    Returns
+    -------
+    Counter with label name (or index) as key and count as value
+    """
+    counter = Counter()
+    for rec in records:
+        for i, v in enumerate(rec['labels']):
+            if v == 1:
+                label = label_names[i] if label_names else i
+                counter[label] += 1
+    return counter
 
 def plot_dicom_debug(dicom_path):
     """
@@ -81,6 +105,18 @@ if __name__ == "__main__":
     records = parse_openi_xml(str(XML_DIR), str(DICOM_ROOT))
     print("Loaded records:", len(records))
 
+    FINDINGS = [
+    "Atelectasis", "Cardiomegaly", "Consolidation", "Edema", "Effusion",
+    "Emphysema", "Fibrosis", "Hernia", "Infiltration", "Mass",
+    "Nodule", "Pleural_Thickening", "Pneumonia", "Pneumothorax"
+]
+
+    label_counts = analyze_label_distribution(records, label_names=FINDINGS)
+
+    print(f"→ Found {len(label_counts)} active labels:")
+    for label, count in label_counts.most_common():
+        print(f"  • {label:20s} — {count} cases")
+
     # Compute mean/std with RawStatDataset
     ds = RawStatDataset(records[:100])
     dl = DataLoader(ds, batch_size=16, num_workers=4, pin_memory=True)
@@ -121,6 +157,16 @@ if __name__ == "__main__":
 
     # Debug DICOM
     plot_dicom_debug(records[0]['dicom_path'])
+
+    print("\n--- Report Text ---")
+    print(records[0]['report_text'])
+    print("\n--- Label Vector ---")
+    print(records[0]['labels'])  
+    print("Total records parsed:", len(records))
+    total_label_hits = sum(sum(r['labels']) for r in records)
+    print("Total labels across all records:", total_label_hits)
+    avg_per_image = total_label_hits / len(records)
+    print(f"Average labels per image: {avg_per_image:.2f}")
 
     # Debug DICOM ranges
     B = imgs.size(0)

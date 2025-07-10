@@ -1,14 +1,24 @@
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from tensorDICOM import DICOMImagePreprocessor
-import multiprocessing
 from pathlib import Path
+import torch
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PLACE = BASE_DIR / "models"
 
 def tokenize_report(text, tokenizer, max_length=128):
-    """Tokenize report using Hugging Face tokenizer."""
+    """
+    Tokenize report using a Hugging Face tokenizer.
+
+    Args:
+        text (str): The report text to be tokenized.
+        tokenizer (transformers.PreTrainedTokenizer): The tokenizer to use for tokenization.
+        max_length (int, optional): The maximum length for tokenization. Defaults to 128.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: A tuple containing the tokenized input IDs and attention mask.
+    """
     tokens = tokenizer(
         text or "",
         padding='max_length',
@@ -59,7 +69,7 @@ class ChestXRDataset(Dataset):
                 - 'image': Processed image tensor from the DICOM file.
                 - 'input_ids': Tokenized input IDs of the report text.
                 - 'attn_mask': Attention mask for the tokenized report text.
-                - 'mesh_labels' (optional): Labels associated with the sample, if available.
+                - 'labels' (optional): Labels associated with the sample, if available.
         """
         rec = self.records[idx]
         # Process image
@@ -73,9 +83,11 @@ class ChestXRDataset(Dataset):
         sample = {
             'image': img,
             'input_ids': input_ids,
-            'attn_mask': attn_mask
+            'attn_mask': attn_mask,
+            'id': rec['id'] 
         }
         # Optional labels
-        if 'mesh_labels' in rec:
-            sample['mesh_labels'] = rec['mesh_labels']
+        if 'labels' in rec:
+            sample['labels'] = torch.tensor(rec['labels'], dtype=torch.float32)
+
         return sample

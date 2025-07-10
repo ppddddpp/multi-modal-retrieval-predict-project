@@ -29,7 +29,7 @@ def tokenize_report(text, tokenizer, max_length=128):
     return tokens.input_ids.squeeze(0), tokens.attention_mask.squeeze(0)
 
 def build_dataloader(records, batch_size=4, shuffle=True, num_workers=4,
-                     mean=0.5, std=0.5, tokenizer=None):
+                     mean=0.5, std=0.5, tokenizer=None, augment=False):
     """
     Convenience function to create DataLoader for ChestXRDataset.
 
@@ -41,11 +41,11 @@ def build_dataloader(records, batch_size=4, shuffle=True, num_workers=4,
         mean (float, optional): Image normalization mean. Defaults to 0.5.
         std (float, optional): Image normalization std. Defaults to 0.5.
         tokenizer (transformers.AutoTokenizer, optional): Defaults to None.
-
+        augment (bool, optional): Defaults to False.
     Returns:
         torch.utils.data.DataLoader
     """
-    preprocessor = DICOMImagePreprocessor(mean=mean, std=std)
+    preprocessor = DICOMImagePreprocessor(mean=mean, std=std, augment=augment)
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained(
             "emilyalsentzer/Bio_ClinicalBERT",

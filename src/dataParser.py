@@ -1,6 +1,67 @@
 import os
-import xml.etree.ElementTree as ET
 import glob
+import xml.etree.ElementTree as ET
+import re
+
+# ----------------------------
+# Rule-based CheXpert-style labeler
+# ----------------------------
+FINDINGS = {
+    "Atelectasis": ["atelectasis"],
+    "Cardiomegaly": ["cardiomegaly", "enlarged cardiac", "cardiac enlargement"],
+    "Consolidation": ["consolidation"],
+    "Edema": ["edema", "interstitial fluid"],
+    "Effusion": ["pleural effusion", "effusion"],
+    "Emphysema": ["emphysema"],
+    "Fibrosis": ["fibrosis"],
+    "Hernia": ["hernia"],
+    "Infiltration": ["infiltrate", "infiltration"],
+    "Mass": ["mass"],
+    "Nodule": ["nodule"],
+    "Pleural_Thickening": ["pleural thickening"],
+    "Pneumonia": ["pneumonia"],
+    "Pneumothorax": ["pneumothorax"]
+}
+
+NEGATIONS = [
+    r'no (evidence of|sign of|indication of)?\s*{}',
+    r'without (any )?{}',
+    r'negative for {}',
+    r'{} is absent',
+    r'absence of {}'
+]
+
+def label_report(text):
+    """
+    Labels a given radiology report text with the 14 findings defined in
+    FINDINGS. The function returns a list of 14 binary labels, corresponding
+    to the order of the findings in FINDINGS. The value of each label is 1 if
+    the finding is present in the report and 0 if it is not. The function is
+    case-insensitive.
+
+    Parameters
+    ----------
+    text : str
+        The radiology report text to label.
+
+    Returns
+    -------
+    labels : list of int
+        The 14 binary labels corresponding to the findings in FINDINGS.
+    """
+    labels = {}
+    text = text.lower()
+    for finding, keywords in FINDINGS.items():
+        found = 0
+        for kw in keywords:
+            if re.search(r'\b' + re.escape(kw) + r'\b', text):
+                # check for negation
+                is_negated = any(re.search(pattern.format(re.escape(kw)), text) for pattern in NEGATIONS)
+                if not is_negated:
+                    found = 1
+                    break
+        labels[finding] = found
+    return list(labels.values())  # 14 labels
 
 def parse_openi_xml(xml_dir, dicom_root):
     """
@@ -15,11 +76,11 @@ def parse_openi_xml(xml_dir, dicom_root):
 
     Returns
     -------
-    records : list
-        List of dicts where each dict has the keys 'id', 'dicom_path', 'report_text', and 'mesh_labels'
+    records : list of dicts
+        Each dict has: 'id', 'dicom_path', 'report_text', 'labels' (14-dim vector)
     """
     all_dcms = glob.glob(os.path.join(dicom_root, '**', '*.dcm'), recursive=True)
-    dcm_map = { os.path.splitext(os.path.basename(p))[0]: p for p in all_dcms }
+    dcm_map = {os.path.splitext(os.path.basename(p))[0]: p for p in all_dcms}
 
     print(f"[INFO] Found {len(os.listdir(xml_dir))} XML files in {xml_dir}")
     print(f"[INFO] Found {len(all_dcms)} DICOM files in {dicom_root}")
@@ -35,35 +96,39 @@ def parse_openi_xml(xml_dir, dicom_root):
         root = tree.getroot()
 
         for img_tag in root.findall('parentImage'):
-            raw_id = img_tag.attrib.get('id')
+            raw_id = img_tag.attrib.get('id')  # e.g. CXR3_1_IM-1384-2001
             if not raw_id:
                 continue
 
-            # --- Normalize ID ---
-            image_id = raw_id.replace("CXR", "")
-            parts = image_id.split('_', 1)
-            if len(parts) == 2:
-                image_id = parts[1]
+            # Normalize ID and match to DICOM
+            if raw_id.startswith("CXR") and "_" in raw_id:
+                parts = raw_id[3:].split("_", 1)
+                if len(parts) == 2:
+                    image_id = parts[0] + "_" + parts[1]
+                else:
+                    continue
             else:
                 continue
 
-            # Match to DICOM file
             dcm_path = dcm_map.get(image_id)
             if not dcm_path:
                 continue
 
-            # Extract report text
-            report = root.findtext('AbstractText') or ""
-            report = report.strip()
+            # Extract full report text
+            abstract_parts = [n.text.strip() for n in root.findall('.//AbstractText') if n.text]
+            if not abstract_parts:
+                title = root.findtext('.//ArticleTitle') or ""
+                abstract_parts = [title.strip()]
+            report = " ".join(abstract_parts)
 
-            # MeSH terms
-            mesh = [m.text for m in root.findall('.//MeshHeading/DescriptorName')]
+            # Generate 14-dim label vector
+            label_vector = label_report(report)
 
             records.append({
-                'id':          image_id,
-                'dicom_path':  dcm_path,
+                'id': image_id,
+                'dicom_path': dcm_path,
                 'report_text': report,
-                'mesh_labels': mesh
+                'labels': label_vector
             })
 
     print(f"[INFO] Loaded {len(records)} records.")

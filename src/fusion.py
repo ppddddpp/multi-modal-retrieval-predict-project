@@ -25,6 +25,21 @@ class Backbones(nn.Module):
             bert_local_dir=None,
             pretrained=True
             ):
+        """
+        Constructor for Backbones.
+
+        Args:
+            swin_model_name (str): The Swin Transformer model name.
+                Defaults to 'swin_base_patch4_window7_224'.
+            bert_model_name (str): The ClinicalBERT model name.
+                Defaults to 'emilyalsentzer/Bio_ClinicalBERT'.
+            swin_checkpoint_path (str): The path to the Swin model safetensor checkpoint.
+                If None, downloads from HuggingFace.
+            bert_local_dir (str): The path to the local ClinicalBERT model directory.
+                If None, downloads from HuggingFace.
+            pretrained (bool): Whether to load the pre-trained weights.
+                Defaults to True.
+        """
         super().__init__()
         # instantiate with random weights
         self.swin = timm.create_model(swin_model_name, pretrained=False, in_chans=1)
@@ -50,7 +65,7 @@ class Backbones(nn.Module):
 
             # load with strict=False to ignore missing / unexpected
             missing, unexpected = self.swin.load_state_dict(filtered, strict=False)
-            print(f"[fusion] Swin loaded – missing keys: {missing}, unexpected keys: {unexpected}")
+            print(f"[Info] [fusion.py] Swin loaded – missing keys: {missing}, unexpected keys: {unexpected}")
             
         elif pretrained:
             # if no local checkpoint, let timm download / cache normally
@@ -69,94 +84,105 @@ class Backbones(nn.Module):
 
 
     def forward(self, image, input_ids, attention_mask):
-        # image: (B, C, H, W)
-        B = image.size(0)
-        img_feats = self.swin_features(image)   # (B, feat, 1, 1)
-        img_feats = img_feats.view(B, -1)       # (B, img_dim)
+        # image
+        patch_feats = self.swin_features(image)            # (B, H, W, C)
+        B, H, W, C = patch_feats.shape
+        patch_feats = patch_feats.reshape(B, H * W, C)     # (B, N_patches, C)
+        patch_feats = self.swin.norm(patch_feats)          # (B, N_patches, C)
+        global_feats = patch_feats.mean(dim=1)             # (B, C)
 
         # text
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         txt_feats = outputs.pooler_output       # (B, txt_dim)
 
-        return img_feats, txt_feats
-
-
-class SimpleFusionHead(nn.Module):
-    """
-    Fusion MLP: concatenates image and text features and projects to joint embedding.
-    """
-    def __init__(self, img_dim, txt_dim, joint_dim=256, hidden_dim=512, dropout=0.3):
-        super().__init__()
-        self.fusion = nn.Sequential(
-            nn.Linear(img_dim + txt_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, joint_dim)
-        )
-
-    def forward(self, img_feats, txt_feats):
-        x = torch.cat([img_feats, txt_feats], dim=1)
-        joint = self.fusion(x)
-        return joint
-
+        return (global_feats, patch_feats), txt_feats
 
 class CrossModalFusion(nn.Module):
     """
-    Text queries attend over global image features.
+    Cross-modal fusion module.
     """
     def __init__(self, img_dim, txt_dim, joint_dim=256, num_heads=4):
-        super().__init__()
-        # project into a common space for attention
-        self.query_proj = nn.Linear(txt_dim, joint_dim)
-        self.key_proj   = nn.Linear(img_dim, joint_dim)
-        self.value_proj = nn.Linear(img_dim, joint_dim)
+        """
+        Constructor for CrossModalFusion.
 
-        self.attn = nn.MultiheadAttention(joint_dim, num_heads, batch_first=True)
+        Args:
+            img_dim (int): Dimensionality of the image features.
+            txt_dim (int): Dimensionality of the text features.
+            joint_dim (int, optional): Dimensionality of the joint embedding. Defaults to 256.
+            num_heads (int, optional): Number of attention heads. Defaults to 4.
+        """
+        super().__init__()
+        # —— Text queries attend to image patches ——
+        self.query_txt    = nn.Linear(txt_dim, joint_dim)
+        self.key_img      = nn.Linear(img_dim, joint_dim)
+        self.value_img    = nn.Linear(img_dim, joint_dim)
+        self.attn_txt2img = nn.MultiheadAttention(joint_dim, num_heads, batch_first=True)
+
+        # —— Image patches attend to text ——
+        self.query_img     = nn.Linear(img_dim, joint_dim)
+        self.key_txt       = nn.Linear(txt_dim, joint_dim)
+        self.value_txt     = nn.Linear(txt_dim, joint_dim)
+        self.attn_img2txt  = nn.MultiheadAttention(joint_dim, num_heads, batch_first=True)
+
+        # Making sure text and image features have the same dimension
+        self.txt_proj = nn.Linear(txt_dim, joint_dim)
+        self.img_patch_proj = nn.Linear(img_dim, joint_dim)
+        self.img_global_proj = nn.Linear(img_dim, joint_dim)
 
         # final projection after concatenating attended img + text
         self.output = nn.Sequential(
-            nn.Linear(joint_dim + txt_dim, joint_dim),
+            nn.Linear(joint_dim * 2, joint_dim),
             nn.ReLU(),
             nn.Dropout(0.3)
         )
 
-    def forward(self, img_feats, txt_feats):
-        # img_feats: (B, img_dim), txt_feats: (B, txt_dim)
-        B = img_feats.size(0)
+    def forward(self, img_global, img_patch, txt_feats, return_attention=False):
+        """
+        Compute the cross-modal fusion of the input image and text features.
 
-        # prepare Q, K, V as sequences of length 1
-        Q = self.query_proj(txt_feats).unsqueeze(1)   # (B, 1, joint_dim)
-        K = self.key_proj(img_feats).unsqueeze(1)     # (B, 1, joint_dim)
-        V = self.value_proj(img_feats).unsqueeze(1)   # (B, 1, joint_dim)
+        Parameters:
+            img_global (torch.Tensor): Global image features of shape (B, joint_dim).
+            img_patch (torch.Tensor): Image patches of shape (B, N, img_dim).
+            txt_feats (torch.Tensor): Text features of shape (B, txt_dim).
+            return_attention (bool): Whether to return the attention weights.
 
-        # cross-attention: text queries, image keys/values
-        attended, _ = self.attn(Q, K, V)              # (B, 1, joint_dim)
-        attended = attended.squeeze(1)                # (B, joint_dim)
+        Returns:
+            torch.Tensor: The fused features of shape (B, joint_dim).
+            dict: A dictionary containing the attention weights if return_attention is True.
+        """
+        # img_global: (B, joint_dim)
+        # img_patch:  (B, N_patches, img_dim)
+        # txt_feats:  (B, txt_dim)
+        B, N, D = img_patch.shape
 
-        # concatenate with original text embedding
-        x = torch.cat([attended, txt_feats], dim=1)   # (B, joint_dim + txt_dim)
-        return self.output(x)                         # (B, joint_dim)
+        # Text attends to image patches
+        Q_txt = self.query_txt(txt_feats).unsqueeze(1)      # (B, 1, joint_dim)
+        K_img = self.key_img(img_patch)                     # (B, N, joint_dim)
+        V_img = self.value_img(img_patch)                   # (B, N, joint_dim)
+        att_txt2img, attn_weights_txt2img = self.attn_txt2img(Q_txt, K_img, V_img)
+        att_txt2img = att_txt2img.squeeze(1)                # (B, joint_dim)
 
-class GatedFusion(nn.Module):
-    def __init__(self, img_dim, txt_dim, joint_dim=256):
-        super().__init__()
-        # individual projections
-        self.proj_img = nn.Linear(img_dim, joint_dim)
-        self.proj_txt = nn.Linear(txt_dim, joint_dim)
-        # gating
-        self.gate = nn.Sequential(
-            nn.Linear(img_dim + txt_dim, joint_dim),
-            nn.Sigmoid()
-        )
+        # Image patches attend to text
+        Q_img = self.query_img(img_patch)                   # (B, N, joint_dim)
+        K_txt = self.key_txt(txt_feats).unsqueeze(1)        # (B, 1, joint_dim)
+        V_txt = self.value_txt(txt_feats).unsqueeze(1)      # (B, 1, joint_dim)
+        att_img2txt, attn_weights_img2txt = self.attn_img2txt(Q_img, K_txt, V_txt)
 
-    def forward(self, img_feats, txt_feats):
-        gi = self.proj_img(img_feats)   # (B, joint_dim)
-        gt = self.proj_txt(txt_feats)   # (B, joint_dim)
-        # compute gate z ∈ [0,1]^joint_dim
-        z = self.gate(torch.cat([img_feats, txt_feats], dim=1))
-        # fuse: z * gi + (1 - z) * gt
-        fused = z * gi + (1 - z) * gt
+        img_patch_proj = self.img_patch_proj(img_patch)     # (B, N, joint_dim)
+        patches_fused = img_patch_proj + att_img2txt      
+
+        # Pool fused patches to get updated global image vector
+        img_global_proj = self.img_global_proj(img_global)                              # (B, joint_dim)
+        img_global_updated = patches_fused.mean(dim=1) + img_global_proj                    
+        txt_p = self.txt_proj(txt_feats)
+
+        # Concatenate and final projection
+        att_img2txt_pooled = att_img2txt.mean(dim=1)
+        x = torch.cat([att_txt2img + img_global_updated, att_img2txt_pooled + txt_p] , dim=1)   # (B, joint_dim + txt_dim)
+        fused = self.output(x)                                                                  # (B, joint_dim)
+
+        if return_attention:
+            return fused, {'txt2img': attn_weights_txt2img, 'img2txt': attn_weights_img2txt}
         return fused
 
-# compact bilinear pooling (MCB), multi‑modal factorized bilinear (MFB), or Mutan fusion
 
