@@ -8,7 +8,7 @@ except NameError:
 
 MODEL_PLACE = BASE_DIR / 'models'
 
-def load_hf_model_or_local(model_name, local_dir=None, is_tokenizer=False, **kwargs):
+def  load_hf_model_or_local(model_name, local_dir=None, is_tokenizer=False, **kwargs):
     """
     Load a Hugging Face model or tokenizer from a local directory if it exists, else download and save to that directory.
 
@@ -27,8 +27,17 @@ def load_hf_model_or_local(model_name, local_dir=None, is_tokenizer=False, **kwa
     if local_dir:
         local_dir = Path(local_dir)
         if local_dir.exists() and any(local_dir.iterdir()):
-            print(f"[Local] Loading {'tokenizer' if is_tokenizer else 'model'} from: {local_dir}")
-            return from_pretrained(str(local_dir), **kwargs)
+            loader = AutoTokenizer.from_pretrained if is_tokenizer else AutoModel.from_pretrained
+            try:
+                print(f"[Local] Trying to load from {local_dir}")
+                return loader(str(local_dir), **kwargs)
+            except OSError:
+                # if that fails, download & save a copy for next time
+                print(f"[Download] {model_name} → Saving to {local_dir}")
+                local_dir.mkdir(parents=True, exist_ok=True)
+                instance = loader(model_name, cache_dir=str(local_dir), **kwargs)
+                instance.save_pretrained(str(local_dir))
+                return instance
         else:
             print(f"[Download] {model_name} → Saving to {local_dir}")
             local_dir.mkdir(parents=True, exist_ok=True)
