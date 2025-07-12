@@ -6,56 +6,41 @@ try:
 except NameError:
     BASE_DIR = Path.cwd().parent
 
-MODEL_PLACE = BASE_DIR / 'models'
+MODEL_PLACE = BASE_DIR / "models"
 
-def  load_hf_model_or_local(model_name, local_dir=None, is_tokenizer=False, **kwargs):
+def load_hf_model_or_local(
+    model_name: str,
+    local_dir: (str | Path) = None,
+    is_tokenizer: bool = False,
+    **kwargs
+):
     """
-    Load a Hugging Face model or tokenizer from a local directory if it exists, else download and save to that directory.
+    Load a Hugging Face model or tokenizer from a local directory if valid, 
+    otherwise download from HF hub, save locally, and return it.
 
     Args:
-        model_name (str): The name of the model or tokenizer to load.
-        local_dir (str, Path): The local directory to look for the model or tokenizer, or None to use
-            `MODEL_PLACE` from `model_utils.py`.
-        is_tokenizer (bool): Whether to load a tokenizer or not. Defaults to False.
-        **kwargs: Any additional keyword arguments to pass to the Hugging Face `from_pretrained` method.
+        model_name (str): HF model/tokenizer identifier.
+        local_dir (str | Path, optional): Directory to load from or save to.
+                                           Defaults to MODEL_PLACE.
+        is_tokenizer (bool): If True, loads a tokenizer; else loads a model.
+        **kwargs: Passed through to `from_pretrained`.
 
     Returns:
-        The loaded model or tokenizer.
+        Pretrained model or tokenizer.
     """
-    from_pretrained = AutoTokenizer.from_pretrained if is_tokenizer else AutoModel.from_pretrained
+    local_dir = Path(local_dir) if local_dir else MODEL_PLACE
+    loader = AutoTokenizer.from_pretrained if is_tokenizer else AutoModel.from_pretrained
 
-    if local_dir:
-        local_dir = Path(local_dir)
-        if local_dir.exists() and any(local_dir.iterdir()):
-            loader = AutoTokenizer.from_pretrained if is_tokenizer else AutoModel.from_pretrained
-            try:
-                print(f"[Local] Trying to load from {local_dir}")
-                return loader(str(local_dir), **kwargs)
-            except OSError:
-                # if that fails, download & save a copy for next time
-                print(f"[Download] {model_name} → Saving to {local_dir}")
-                local_dir.mkdir(parents=True, exist_ok=True)
-                instance = loader(model_name, cache_dir=str(local_dir), **kwargs)
-                instance.save_pretrained(str(local_dir))
-                return instance
-        else:
-            print(f"[Download] {model_name} → Saving to {local_dir}")
-            local_dir.mkdir(parents=True, exist_ok=True)
-            model = from_pretrained(model_name, cache_dir=str(local_dir), **kwargs)
-            model.save_pretrained(str(local_dir))
-            if is_tokenizer:
-                tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=str(local_dir), **kwargs)
-                tokenizer.save_pretrained(str(local_dir))
-                return tokenizer
-            return model
-    else:
-        local_dir = MODEL_PLACE
-        print(f"[Download] {model_name} → Saving to {local_dir}")
-        local_dir.mkdir(parents=True, exist_ok=True)
-        model = from_pretrained(model_name, cache_dir=str(local_dir), **kwargs)
-        model.save_pretrained(str(local_dir))
-        if is_tokenizer:
-            tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=str(local_dir), **kwargs)
-            tokenizer.save_pretrained(str(local_dir))
-            return tokenizer
-        return model
+    # Attempt local load first
+    try:
+        print(f"[Local] Trying to load {'tokenizer' if is_tokenizer else 'model'} from {local_dir}")
+        return loader(str(local_dir), **kwargs)
+    except (OSError, ValueError):
+        # Fall through to download if local load fails
+        print(f"[Download] {model_name} → will save to {local_dir}")
+
+    # Download from HF hub and save
+    local_dir.mkdir(parents=True, exist_ok=True)
+    instance = loader(model_name, cache_dir=str(local_dir), **kwargs)
+    instance.save_pretrained(str(local_dir))
+    return instance
