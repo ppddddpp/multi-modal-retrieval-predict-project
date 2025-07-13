@@ -21,6 +21,7 @@ BATCH_SIZE = 1
 LR = 2e-5
 USE_FOCAL = False  # Toggle between BCEWithLogits and FocalLoss
 FUSION_TYPE = "cross"
+JOINT_DIM = 512
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -108,7 +109,7 @@ if __name__ == '__main__':
 
     # --- Model ---
     model = MultiModalRetrievalModel(
-        joint_dim=256,
+        joint_dim=JOINT_DIM,
         num_classes=14,
         fusion_type=FUSION_TYPE,
         swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
@@ -193,7 +194,7 @@ if __name__ == '__main__':
 
         print(f"Epoch {epoch+1} | Loss: {epoch_loss / len(train_loader):.4f} | Val AUC: {val_auc:.4f} | Val F1: {val_f1:.4f}")
 
-        torch.save(model.state_dict(), CHECKPOINT_DIR / f"model_epoch{epoch+1}.pt")
+        torch.save(model.state_dict(), CHECKPOINT_DIR / f"model_epoch_{epoch+1}.pt")
 
         if val_auc > best_auc:
             best_auc = val_auc
@@ -215,7 +216,7 @@ if __name__ == '__main__':
         json.dump(val_ids, f)
 
     print("Training complete.")
-    print("→ Saving train joint embeddings...")
+    print("Saving train joint embeddings...")
     # Load best model (ensure embeddings align with what val set saw)
     model.load_state_dict(torch.load(CHECKPOINT_DIR / "model_best.pt"))
     model.eval()

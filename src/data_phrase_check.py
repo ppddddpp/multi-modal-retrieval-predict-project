@@ -147,13 +147,16 @@ if __name__ == "__main__":
     )
 
     # Forward‐pass through Backbones
-    img_feats, txt_feats = backbones(imgs, ids, masks)
-    print("Image feats:", img_feats.shape, " NaNs?", torch.isnan(img_feats).any())
-    print("Text feats: ", txt_feats.shape, " NaNs?", torch.isnan(txt_feats).any())
+    (img_global, img_region), txt_feats = backbones(imgs, ids, masks)
 
-    # Embedding norms
-    print("Img norm mean:", img_feats.norm(dim=1).mean().item())
-    print("Txt norm mean:", txt_feats.norm(dim=1).mean().item())
+    print("Global Image feats:", img_global.shape,  " NaNs?", torch.isnan(img_global).any())
+    print("Patch Image feats: ", img_region.shape, " NaNs?", torch.isnan(img_region).any())
+    print("Pooled Text feats: ", txt_feats.shape,  " NaNs?", torch.isnan(txt_feats).any())
+
+    # See some norm mean 
+    print("Global‑img norm mean:", img_global.norm(dim=1).mean().item())
+    print("Patch‑img  norm mean:", img_region.norm(dim=2).mean().item())   # norm over C, then mean over patches&batch
+    print("Text‑feat  norm mean:", txt_feats.norm(dim=1).mean().item())
 
     # Debug DICOM
     plot_dicom_debug(records[0]['dicom_path'])
