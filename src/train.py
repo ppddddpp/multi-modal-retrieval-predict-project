@@ -5,23 +5,33 @@ import numpy as np
 import torch.nn as nn
 from tqdm import tqdm
 from pathlib import Path
-from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve
 from transformers import get_scheduler
 from dataParser import parse_openi_xml
 from model import MultiModalRetrievalModel
 from dataLoader import build_dataloader
-from dotenv import load_dotenv
-load_dotenv()
+from torch.utils.data import WeightedRandomSampler
 import wandb
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # --- Config ---
-EPOCHS = 1
+EPOCHS = 20
 PATIENCE = 5
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 LR = 2e-5
 USE_FOCAL = False  # Toggle between BCEWithLogits and FocalLoss
 FUSION_TYPE = "cross"
 JOINT_DIM = 512
+
+# --- Hyperparameters ---
+temperature = 0.07
+cls_weight   = 1.0                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
+cont_weight  = 0.5                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
+
+# --- Wandb ---
+project_name = "multimodal-disease-classification"
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -34,6 +44,14 @@ EMBED_SAVE_PATH = BASE_DIR / 'embeddings'
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 EMBED_SAVE_PATH.mkdir(exist_ok=True)
 os.environ['TRANSFORMERS_CACHE'] = str(MODEL_DIR)
+
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# --- Setup ---
+device = get_device()
+if device.type == "cpu":
+    raise RuntimeError("No GPU available, run on a CUDA device for better performance")
 
 # --- Focal Loss Class ---
 class FocalLoss(nn.Module):
@@ -79,14 +97,22 @@ def evaluate(model, loader):
     emb_array = torch.cat(all_embs).numpy()
 
     macro_auc = roc_auc_score(y_true, y_pred, average='macro')
-    macro_f1 = f1_score(y_true > 0.5, y_pred > 0.5, average='macro')
+    macro_f1 = f1_score((y_true > 0.5).astype(int), (y_pred > 0.5).astype(int), average='macro')
 
     class_auc = roc_auc_score(y_true, y_pred, average=None)
-    class_f1 = f1_score(y_true > 0.5, y_pred > 0.5, average=None)
+    class_f1 = f1_score((y_true > 0.5).astype(int), (y_pred > 0.5).astype(int), average=None)
 
-    return macro_auc, macro_f1, class_auc, class_f1, emb_array, all_ids
+    return macro_auc, macro_f1, class_auc, class_f1, emb_array, all_ids, y_true, y_pred
 
-# --- Main training---
+def find_best_thresholds(y_true, y_logits):
+    best_ts = []
+    for i in range(y_true.shape[1]):
+        p, r, t = precision_recall_curve(y_true[:, i], y_logits[:, i])
+        f1 = 2 * p * r / (p + r + 1e-8)
+        best_ts.append(t[f1.argmax()])
+    return np.array(best_ts)
+
+# --- Main ---
 if __name__ == '__main__':
     # --- Load records + split ---
     records = parse_openi_xml(XML_DIR, DICOM_ROOT)
@@ -98,47 +124,81 @@ if __name__ == '__main__':
     train_records = [r for r in records if r['id'] in train_ids]
     val_records   = [r for r in records if r['id'] in val_ids]
 
-    # --- Dataloaders ---
-    train_loader = build_dataloader(train_records, batch_size=BATCH_SIZE, mean=0.5, std=0.25)
-    val_loader   = build_dataloader(val_records, batch_size=BATCH_SIZE, mean=0.5, std=0.25)
+    FINDINGS = [
+        "Atelectasis", "Cardiomegaly", "Consolidation", "Edema", "Effusion",
+        "Emphysema", "Fibrosis", "Hernia", "Infiltration", "Mass",
+        "Nodule", "Pleural_Thickening", "Pneumonia", "Pneumothorax"
+    ]
 
-    # --- Class imbalance handling (pos_weight) ---
+    # --- compute per‐label frequencies ---
+    label_sums = np.zeros(len(FINDINGS), dtype=float)
+    for r in train_records:
+        label_sums += np.array(r['labels'], dtype=float)
+    pos_freq = label_sums / len(train_records)
+
+    # --- per‐label weight = 1 / freq (clipped) ---
+    label_weights = 1.0 / np.clip(pos_freq, 1e-3, None)
+
+    # --- per‐sample weights for sampler ---
+    sample_weights = []
+    for r in train_records:
+        lv = np.array(r['labels'], dtype=float)
+        sample_weights.append((lv * label_weights).sum())
+
+    sampler = WeightedRandomSampler(
+        sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
+    # --- Dataloaders ---
+    train_loader = build_dataloader(
+        train_records,
+        batch_size=BATCH_SIZE,
+        mean=0.5, std=0.25,
+        sampler=sampler
+    )
+    val_loader = build_dataloader(
+        val_records,
+        batch_size=BATCH_SIZE,
+        mean=0.5, std=0.25
+    )
+
+    # --- Loss weights & criterion ---
     label_counts = np.array([r['labels'] for r in train_records]).sum(axis=0)
     pos_weight = 1.0 / torch.tensor(label_counts, dtype=torch.float32).clamp(min=1)
     pos_weight = pos_weight.cuda()
 
-    # --- Model ---
+    if USE_FOCAL:
+        # compute alpha for focal
+        alpha = torch.tensor(label_weights, dtype=torch.float32)
+        alpha = alpha / alpha.sum()
+        alpha = alpha.to(device)
+        criterion = FocalLoss(gamma=2, alpha=alpha)
+    else:
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    # --- Model, optimizer, scheduler ---
     model = MultiModalRetrievalModel(
         joint_dim=JOINT_DIM,
         num_classes=14,
         fusion_type=FUSION_TYPE,
         swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
-    ).cuda()
+    ).to(device)
 
-    # --- Loss + Optimizer ---
-    criterion = FocalLoss(gamma=2) if USE_FOCAL else nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
     total_steps = EPOCHS * len(train_loader)
-    scheduler = get_scheduler("linear", optimizer, num_warmup_steps=0, num_training_steps=total_steps)
+    scheduler = get_scheduler("linear", optimizer,  num_warmup_steps=0, num_training_steps=total_steps)
 
     # --- wandb init ---
-    wandb.init(project="multimodal-disease-classification", config={
+    wandb.init(project=project_name, config={
         "epochs": EPOCHS,
         "lr": LR,
         "batch_size": BATCH_SIZE,
         "loss": "focal" if USE_FOCAL else "BCEWithLogits",
         "fusion": FUSION_TYPE
     })
-
-    FINDINGS = ["Atelectasis", "Cardiomegaly", "Consolidation", "Edema", "Effusion",
-                "Emphysema", "Fibrosis", "Hernia", "Infiltration", "Mass", "Nodule",
-                "Pleural_Thickening", "Pneumonia", "Pneumothorax"]
-
-    # --- Hyperparameters ---
-    temperature = 0.07
-    cls_weight   = 1.0                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
-    cont_weight  = 0.5                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
     # --- Early stopping ---
     best_f1 = 0
@@ -167,8 +227,8 @@ if __name__ == '__main__':
             # Contrastive loss (InfoNCE on the joint embedding)
             z_norm = torch.nn.functional.normalize(joint_emb, dim=1)       # (B, D)
             sim_matrix = torch.matmul(z_norm, z_norm.T) / temperature      # cosine‑similarity (B, B) 
-            targets = torch.arange(sim_matrix.size(0), device=sim_matrix.device)
-            cont_loss = torch.nn.functional.cross_entropy(sim_matrix, targets)
+            cont_targets = torch.arange(sim_matrix.size(0), device=sim_matrix.device)
+            cont_loss = torch.nn.functional.cross_entropy(sim_matrix, cont_targets)
 
             # Combined loss (InfoNCE term + chosen loss)
             loss = cls_weight * cls_loss + cont_weight * cont_loss
@@ -180,20 +240,25 @@ if __name__ == '__main__':
 
             epoch_loss += loss.item()
 
-        val_auc, val_f1, class_auc, class_f1, val_embs, val_ids = evaluate(model, val_loader)
+        # --- Validation & threshold tuning ---
+        val_auc, val_f1, class_auc, class_f1, val_embs, val_ids, y_true, y_pred = evaluate(model, val_loader)
+        best_thresh = find_best_thresholds(y_true, y_pred)
+        val_preds = (y_pred > best_thresh[None, :]).astype(int)
+        tuned_f1 = f1_score(y_true, val_preds, average='macro')
 
         wandb.log({
             "epoch": epoch + 1,
             "train_loss": epoch_loss / len(train_loader),
             "val_auc": val_auc,
-            "val_f1": val_f1,
+            "val_f1": tuned_f1,
         })
 
         for i, name in enumerate(FINDINGS):
             wandb.log({f"val_auc_{name}": class_auc[i], f"val_f1_{name}": class_f1[i]})
 
-        print(f"Epoch {epoch+1} | Loss: {epoch_loss / len(train_loader):.4f} | Val AUC: {val_auc:.4f} | Val F1: {val_f1:.4f}")
+        print(f"Epoch {epoch+1} | Loss: {epoch_loss / len(train_loader):.4f} | Val AUC: {val_auc:.4f} | Val F1: {tuned_f1:.4f}")
 
+        # --- Checkpointing & early stop ---
         torch.save(model.state_dict(), CHECKPOINT_DIR / f"model_epoch_{epoch+1}.pt")
 
         if val_auc > best_auc:

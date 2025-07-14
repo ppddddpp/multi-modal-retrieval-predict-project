@@ -1,7 +1,7 @@
 from tensorDICOM import DICOMImagePreprocessor
 from transformers import AutoTokenizer
 from ChestXRDataset import ChestXRDataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -28,8 +28,17 @@ def tokenize_report(text, tokenizer, max_length=128):
     )
     return tokens.input_ids.squeeze(0), tokens.attention_mask.squeeze(0)
 
-def build_dataloader(records, batch_size=4, shuffle=True, num_workers=4,
-                     mean=0.5, std=0.5, tokenizer=None, augment=False):
+def build_dataloader(
+        records, 
+        batch_size=4, 
+        shuffle=True, 
+        num_workers=4,
+        mean=0.5, 
+        std=0.5, 
+        tokenizer=None, 
+        augment=False,
+        sampler: WeightedRandomSampler = None
+):
     """
     Convenience function to create DataLoader for ChestXRDataset.
 
@@ -42,6 +51,7 @@ def build_dataloader(records, batch_size=4, shuffle=True, num_workers=4,
         std (float, optional): Image normalization std. Defaults to 0.5.
         tokenizer (transformers.AutoTokenizer, optional): Defaults to None.
         augment (bool, optional): Defaults to False.
+
     Returns:
         torch.utils.data.DataLoader
     """
@@ -53,5 +63,15 @@ def build_dataloader(records, batch_size=4, shuffle=True, num_workers=4,
         )
     dataset = ChestXRDataset(records, image_preprocessor=preprocessor,
                              tokenizer=tokenizer)
-    return DataLoader(dataset, batch_size=batch_size,
-                      shuffle=shuffle, num_workers=num_workers)
+    if sampler is not None:
+        return DataLoader(dataset,
+                          batch_size=batch_size,
+                          sampler=sampler,
+                          num_workers=num_workers,
+                          pin_memory=True)
+    else:
+        return DataLoader(dataset,
+                          batch_size=batch_size,
+                          shuffle=shuffle,
+                          num_workers=num_workers,
+                          pin_memory=True)
