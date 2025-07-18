@@ -184,6 +184,7 @@ cython_debug/
 
 # Ignore large size folders 
 data
+outputs
 models
 splited_data
 
@@ -195,6 +196,8 @@ structure.txt
 EDA_after_split.ipynb
 EDA_before_split.ipynb
 data_phrase_check.ipynb
+dataEDAnLabeledCheck.ipynb
+finalOutputDataEDA.ipynb
 
 # Ignore additional files
 cudaCheck.ipynb

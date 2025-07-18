@@ -1,43 +1,68 @@
+import sys
 import os
 import glob
 import xml.etree.ElementTree as ET
-import re
+import spacy
+from spacy.matcher import PhraseMatcher
+from negspacy.negation import Negex
+from pathlib import Path
+import subprocess
+import shutil
+from labeledData import disease_groups, normal_groups
 
-# ----------------------------
-# Rule-based CheXpert-style labeler
-# ----------------------------
-FINDINGS = {
-    "Atelectasis": ["atelectasis"],
-    "Cardiomegaly": ["cardiomegaly", "enlarged cardiac", "cardiac enlargement"],
-    "Consolidation": ["consolidation"],
-    "Edema": ["edema", "interstitial fluid"],
-    "Effusion": ["pleural effusion", "effusion"],
-    "Emphysema": ["emphysema"],
-    "Fibrosis": ["fibrosis"],
-    "Hernia": ["hernia"],
-    "Infiltration": ["infiltrate", "infiltration"],
-    "Mass": ["mass"],
-    "Nodule": ["nodule"],
-    "Pleural_Thickening": ["pleural thickening"],
-    "Pneumonia": ["pneumonia"],
-    "Pneumothorax": ["pneumothorax"]
+BASE_DIR    = Path(__file__).resolve().parent.parent
+MODEL_PLACE = BASE_DIR / "models"
+MODEL_PLACE.mkdir(exist_ok=True)
+
+combined_groups = {
+    **disease_groups,
+    **normal_groups
 }
 
-NEGATIONS = [
-    r'no (evidence of|sign of|indication of)?\s*{}',
-    r'without (any )?{}',
-    r'negative for {}',
-    r'{} is absent',
-    r'absence of {}'
-]
+# If the model isn’t already in models/, download it there
+try:
+    spacy.load("en_core_sci_sm")
+except OSError:
+    print("[INFO] en_core_sci_sm not found, downloading...")
+    subprocess.run([
+        sys.executable, "-m", "pip", "install",
+        "https://huggingface.co/allenai/en_core_sci_sm/resolve/main/en_core_sci_sm-0.5.1.tar.gz"
+    ], check=True)
 
-def label_report(text):
+# Load the model
+import spacy
+nlp = spacy.load("en_core_sci_sm")
+print("[INFO] Loaded model from:", nlp.path)
+
+# ----------------------------
+# Set up SpaCy + Negex
+# ----------------------------
+nlp = spacy.load("en_core_sci_sm")
+nlp.add_pipe("negex", config={"ent_types": ["MATCH"]})
+
+# ----------------------------
+# Build a PhraseMatcher for all disease keywords
+# ----------------------------
+matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+keyword_to_group = {}  # flat lookup
+for group, kws in combined_groups.items():
+    for kw in kws:
+        doc = nlp.make_doc(kw)
+        matcher.add(group, [doc])
+        keyword_to_group[kw.lower()] = group
+
+# ----------------------------
+# Build a keyword → disease_group map
+# ----------------------------
+keyword_to_group = {
+    kw.lower(): group
+    for group, kws in combined_groups.items()
+    for kw in kws
+}
+
+def label_report_diseases(text):
     """
-    Labels a given radiology report text with the 14 findings defined in
-    FINDINGS. The function returns a list of 14 binary labels, corresponding
-    to the order of the findings in FINDINGS. The value of each label is 1 if
-    the finding is present in the report and 0 if it is not. The function is
-    case-insensitive.
+    Label a given radiology report text with the disease groups and normal groups in `combined_groups`.
 
     Parameters
     ----------
@@ -46,22 +71,45 @@ def label_report(text):
 
     Returns
     -------
-    labels : list of int
-        The 14 binary labels corresponding to the findings in FINDINGS.
+    dict of str to int
+        A dictionary mapping each disease group to 1 if the group is present in
+        the text or 0 if it is not.
     """
-    labels = {}
-    text = text.lower()
-    for finding, keywords in FINDINGS.items():
-        found = 0
-        for kw in keywords:
-            if re.search(r'\b' + re.escape(kw) + r'\b', text):
-                # check for negation
-                is_negated = any(re.search(pattern.format(re.escape(kw)), text) for pattern in NEGATIONS)
-                if not is_negated:
-                    found = 1
-                    break
-        labels[finding] = found
-    return list(labels.values())  # 14 labels
+    doc = nlp(text)
+    # initialize all groups to 0
+    labels = {group: 0 for group in combined_groups}
+
+    matches = matcher(doc)
+    for match_id, start, end in matches:
+        span = doc[start:end]
+        group = nlp.vocab.strings[match_id]  # the group name we added
+        # negspacy marks span._.negex = True if it's negated
+        if not span._.negex:
+            labels[group] = 1
+
+    return labels
+
+def label_vector(text):
+    """
+    Return a binary label vector corresponding to the disease groups in `text`
+
+    The vector is ordered by the sorted keys of `disease_groups` and `normal_groups` and contains
+    binary values (0 or 1) indicating the presence or absence of each group in
+    the text.
+
+    Parameters
+    ----------
+    text : str
+        The text to be analyzed
+
+    Returns
+    -------
+    list of int
+        A binary label vector
+    """
+    ordered = sorted(combined_groups.keys())
+    lbls = label_report_diseases(text)
+    return [lbls[g] for g in ordered]
 
 def parse_openi_xml(xml_dir, dicom_root):
     """
@@ -121,14 +169,22 @@ def parse_openi_xml(xml_dir, dicom_root):
                 abstract_parts = [title.strip()]
             report = " ".join(abstract_parts)
 
-            # Generate 14-dim label vector
-            label_vector = label_report(report)
+            # Label diseases
+            vec = label_vector(report)
+
+            ordered_labels = sorted(combined_groups.keys())
+            normal_idx = ordered_labels.index("Normal")
+
+            is_normal = vec[normal_idx] == 1 and sum(vec) == 1
+            is_abnormal = any(vec[i] for i in range(len(vec)) if i != normal_idx)
 
             records.append({
                 'id': image_id,
                 'dicom_path': dcm_path,
                 'report_text': report,
-                'labels': label_vector
+                'labels': vec,
+                'is_normal': is_normal,
+                'is_abnormal': is_abnormal
             })
 
     print(f"[INFO] Loaded {len(records)} records.")

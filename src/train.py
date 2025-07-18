@@ -2,6 +2,7 @@ import os
 import json
 import torch
 import numpy as np
+import pandas as pd
 import torch.nn as nn
 from tqdm import tqdm
 from pathlib import Path
@@ -11,19 +12,20 @@ from dataParser import parse_openi_xml
 from model import MultiModalRetrievalModel
 from dataLoader import build_dataloader
 from torch.utils.data import WeightedRandomSampler
+from labeledData import disease_groups, normal_groups
 import wandb
 
 from dotenv import load_dotenv
 load_dotenv()
 
 # --- Config ---
-EPOCHS = 20
+EPOCHS = 1
 PATIENCE = 5
-BATCH_SIZE = 4
+BATCH_SIZE = 1
 LR = 2e-5
 USE_FOCAL = False  # Toggle between BCEWithLogits and FocalLoss
 FUSION_TYPE = "cross"
-JOINT_DIM = 512
+JOINT_DIM = 256
 
 # --- Hyperparameters ---
 temperature = 0.07
@@ -44,6 +46,7 @@ EMBED_SAVE_PATH = BASE_DIR / 'embeddings'
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 EMBED_SAVE_PATH.mkdir(exist_ok=True)
 os.environ['TRANSFORMERS_CACHE'] = str(MODEL_DIR)
+label_cols = list(disease_groups.keys()) + list(normal_groups.keys())
 
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -112,26 +115,80 @@ def find_best_thresholds(y_true, y_logits):
         best_ts.append(t[f1.argmax()])
     return np.array(best_ts)
 
+def check_label_consistency(records, labels_df, label_cols):
+    mismatches = []
+
+    for rec in records:
+        rec_id = rec["id"]
+        if rec_id not in labels_df.index:
+            mismatches.append((rec_id, "Missing in labels_df"))
+            continue
+        
+        df_vector = labels_df.loc[rec_id, label_cols].tolist()
+        record_vector = rec["labels"]
+
+        if list(map(int, df_vector)) != list(map(int, record_vector)):
+            mismatches.append((rec_id, df_vector, record_vector))
+    
+    if mismatches:
+        print(f"Found {len(mismatches)} mismatched records!")
+        # Print the first few mismatches
+        for i, item in enumerate(mismatches[:5]):
+            print(f"\nMismatch #{i+1}")
+            print("ID:", item[0])
+            print("From labels_df:", item[1])
+            print("From record:   ", item[2])
+    else:
+        print(" All label vectors match the CSV.")
+
+    return mismatches
+
+def df_to_records(df):
+    return [
+        {
+            "id": row["id"],
+            "report_text": row["report_text"],
+            "labels": [row[f] for f in label_cols],
+            "dicom_path": row["dicom_path"]
+        }
+        for _, row in df.iterrows()
+    ]
+
 # --- Main ---
 if __name__ == '__main__':
     # --- Load records + split ---
-    records = parse_openi_xml(XML_DIR, DICOM_ROOT)
+    parsed_records = parse_openi_xml(XML_DIR, DICOM_ROOT)
+    labels_df = pd.read_csv(BASE_DIR / "outputs" / "openi_labels_final.csv").set_index("id")
+    label_cols = list(disease_groups.keys()) + list(normal_groups.keys())
+
+    records = []
+    for rec in parsed_records:
+        rec_id = rec["id"]
+        if rec_id in labels_df.index:
+            label_vec = labels_df.loc[rec_id, label_cols].tolist()
+            records.append({
+                "id": rec["id"],
+                "report_text": rec["report_text"],
+                "dicom_path": rec["dicom_path"],
+                "labels": label_vec
+            })
+
+    mismatches = check_label_consistency(records, labels_df, label_cols)
+    if mismatches:
+        raise Exception("Mismatched records found in records and labels_df")
+
     with open(SPLIT_DIR / "train_split_ids.json") as f:
         train_ids = set(json.load(f))
     with open(SPLIT_DIR / "val_split_ids.json") as f:
         val_ids = set(json.load(f))
 
-    train_records = [r for r in records if r['id'] in train_ids]
-    val_records   = [r for r in records if r['id'] in val_ids]
+    train_records = [r for r in records if r["id"] in train_ids]
+    val_records   = [r for r in records if r["id"] in val_ids]
 
-    FINDINGS = [
-        "Atelectasis", "Cardiomegaly", "Consolidation", "Edema", "Effusion",
-        "Emphysema", "Fibrosis", "Hernia", "Infiltration", "Mass",
-        "Nodule", "Pleural_Thickening", "Pneumonia", "Pneumothorax"
-    ]
+    print(f"Train size: {len(train_records)}, Val size: {len(val_records)}")
 
     # --- compute per‐label frequencies ---
-    label_sums = np.zeros(len(FINDINGS), dtype=float)
+    label_sums = np.zeros(len(label_cols), dtype=float)
     for r in train_records:
         label_sums += np.array(r['labels'], dtype=float)
     pos_freq = label_sums / len(train_records)
@@ -181,7 +238,7 @@ if __name__ == '__main__':
     # --- Model, optimizer, scheduler ---
     model = MultiModalRetrievalModel(
         joint_dim=JOINT_DIM,
-        num_classes=14,
+        num_classes=len(label_cols),
         fusion_type=FUSION_TYPE,
         swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
@@ -242,6 +299,7 @@ if __name__ == '__main__':
 
         # --- Validation & threshold tuning ---
         val_auc, val_f1, class_auc, class_f1, val_embs, val_ids, y_true, y_pred = evaluate(model, val_loader)
+        
         best_thresh = find_best_thresholds(y_true, y_pred)
         val_preds = (y_pred > best_thresh[None, :]).astype(int)
         tuned_f1 = f1_score(y_true, val_preds, average='macro')
@@ -253,7 +311,7 @@ if __name__ == '__main__':
             "val_f1": tuned_f1,
         })
 
-        for i, name in enumerate(FINDINGS):
+        for i, name in enumerate(label_cols):
             wandb.log({f"val_auc_{name}": class_auc[i], f"val_f1_{name}": class_f1[i]})
 
         print(f"Epoch {epoch+1} | Loss: {epoch_loss / len(train_loader):.4f} | Val AUC: {val_auc:.4f} | Val F1: {tuned_f1:.4f}")
@@ -275,7 +333,7 @@ if __name__ == '__main__':
                 break
 
     # Always save last val embeddings (even if not best)
-    val_auc, val_f1, class_auc, class_f1, val_embs, val_ids = evaluate(model, val_loader)
+    val_auc, val_f1, class_auc, class_f1, val_embs, val_ids, _, _ = evaluate(model, val_loader)
     np.save(EMBED_SAVE_PATH / "val_last_embeddings.npy", val_embs)
     with open(EMBED_SAVE_PATH / "val_last_ids.json", "w") as f:
         json.dump(val_ids, f)
@@ -285,7 +343,7 @@ if __name__ == '__main__':
     # Load best model (ensure embeddings align with what val set saw)
     model.load_state_dict(torch.load(CHECKPOINT_DIR / "model_best.pt"))
     model.eval()
-    train_auc, train_f1, _, _, train_embs, train_ids = evaluate(model, train_loader)
+    train_auc, train_f1, class_auc, class_f1, train_embs, train_ids, y_true, y_pred = evaluate(model, train_loader)
     np.save(EMBED_SAVE_PATH / "train_joint_embeddings.npy", train_embs)
     with open(EMBED_SAVE_PATH / "train_ids.json", "w") as f:
         json.dump(train_ids, f)
@@ -294,3 +352,5 @@ if __name__ == '__main__':
     "train_auc": train_auc,
     "train_f1": train_f1
     })
+
+    print("Done.")

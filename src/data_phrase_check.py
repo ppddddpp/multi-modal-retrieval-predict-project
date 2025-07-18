@@ -12,6 +12,7 @@ from tensorDICOM import DICOMImagePreprocessor
 import pydicom
 import numpy as np
 from collections import Counter
+from labeledData import disease_groups, normal_groups
 
 # Resolve paths...
 try:
@@ -24,7 +25,7 @@ DICOM_ROOT = BASE_DIR / 'data' / 'openi' / 'dicom'
 MODEL_PLACE = BASE_DIR / "models"
 os.environ['TRANSFORMERS_CACHE'] = str(MODEL_PLACE)
 
-def analyze_label_distribution(records, label_names=None):
+def analyze_label_distribution(records,label_field='labels', label_names=None):
     """
     Count how often each label (from label vectors) appears in the dataset.
     
@@ -41,7 +42,8 @@ def analyze_label_distribution(records, label_names=None):
     """
     counter = Counter()
     for rec in records:
-        for i, v in enumerate(rec['labels']):
+        vec = rec[label_field]
+        for i, v in enumerate(vec):
             if v == 1:
                 label = label_names[i] if label_names else i
                 counter[label] += 1
@@ -101,17 +103,28 @@ if __name__ == "__main__":
     print("DICOM ROOT exists:", DICOM_ROOT.exists(), " →", DICOM_ROOT)
     tokenizer = load_hf_model_or_local("emilyalsentzer/Bio_ClinicalBERT", local_dir=MODEL_PLACE, is_tokenizer=True)
 
+    combined_groups = {
+    **disease_groups,
+    **normal_groups
+    }
+
+    label_names = sorted(combined_groups.keys())
+    normal_idx = label_names.index("Normal")
+
     # Parse records
     records = parse_openi_xml(str(XML_DIR), str(DICOM_ROOT))
     print("Loaded records:", len(records))
 
-    FINDINGS = [
-    "Atelectasis", "Cardiomegaly", "Consolidation", "Edema", "Effusion",
-    "Emphysema", "Fibrosis", "Hernia", "Infiltration", "Mass",
-    "Nodule", "Pleural_Thickening", "Pneumonia", "Pneumothorax"
-]
+    for r in records:
+        vec = r["labels"]
+        r["is_normal"] = vec[normal_idx] == 1 and sum(vec) == 1
+        r["is_abnormal"] = any(vec[i] for i in range(len(vec)) if i != normal_idx)
 
-    label_counts = analyze_label_distribution(records, label_names=FINDINGS)
+    label_counts = analyze_label_distribution(
+        records,
+        label_field='labels',
+        label_names=label_names
+    )
 
     print(f"→ Found {len(label_counts)} active labels:")
     for label, count in label_counts.most_common():
@@ -170,6 +183,10 @@ if __name__ == "__main__":
     print("Total labels across all records:", total_label_hits)
     avg_per_image = total_label_hits / len(records)
     print(f"Average labels per image: {avg_per_image:.2f}")
+    n_normals = sum(r['is_normal'] for r in records)
+    n_abnormals = sum(r['is_abnormal'] for r in records)
+    print(f"Normal cases: {n_normals}")
+    print(f"Abnormal cases: {n_abnormals}")
 
     # Debug DICOM ranges
     B = imgs.size(0)
