@@ -26,7 +26,7 @@ except OSError:
     print("[INFO] en_core_sci_sm not found, downloading...")
     subprocess.run([
         sys.executable, "-m", "pip", "install",
-        "https://huggingface.co/allenai/en_core_sci_sm/resolve/main/en_core_sci_sm-0.5.1.tar.gz"
+        "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_sm-0.5.1.tar.gz"
     ], check=True)
 
 # Load the model

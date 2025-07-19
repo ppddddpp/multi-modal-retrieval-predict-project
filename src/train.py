@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Config ---
-EPOCHS = 1
+EPOCHS = 2
 PATIENCE = 5
 BATCH_SIZE = 1
 LR = 2e-5
@@ -33,7 +33,7 @@ cls_weight   = 1.0                  # focuses on getting the labels right (1.0 i
 cont_weight  = 0.5                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
 # --- Wandb ---
-project_name = "multimodal-disease-classification"
+project_name = "multimodal-disease-classification-test-1907"
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -304,15 +304,16 @@ if __name__ == '__main__':
         val_preds = (y_pred > best_thresh[None, :]).astype(int)
         tuned_f1 = f1_score(y_true, val_preds, average='macro')
 
-        wandb.log({
-            "epoch": epoch + 1,
+        metrics = {
             "train_loss": epoch_loss / len(train_loader),
-            "val_auc": val_auc,
-            "val_f1": tuned_f1,
-        })
-
-        for i, name in enumerate(label_cols):
-            wandb.log({f"val_auc_{name}": class_auc[i], f"val_f1_{name}": class_f1[i]})
+            "val_auc":    val_auc,
+            "val_f1":     tuned_f1,
+            "epoch": epoch+1,
+            # per‑class AUC/F1:
+            **{f"val_auc_{cn}": a for cn, a in zip(label_cols, class_auc)},
+            **{f"val_f1_{cn}": f for cn, f in zip(label_cols, class_f1)},
+        }
+        wandb.log(metrics, step=epoch + 1)
 
         print(f"Epoch {epoch+1} | Loss: {epoch_loss / len(train_loader):.4f} | Val AUC: {val_auc:.4f} | Val F1: {tuned_f1:.4f}")
 
@@ -347,10 +348,5 @@ if __name__ == '__main__':
     np.save(EMBED_SAVE_PATH / "train_joint_embeddings.npy", train_embs)
     with open(EMBED_SAVE_PATH / "train_ids.json", "w") as f:
         json.dump(train_ids, f)
-
-    wandb.log({
-    "train_auc": train_auc,
-    "train_f1": train_f1
-    })
 
     print("Done.")
