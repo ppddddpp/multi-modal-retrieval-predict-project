@@ -13,7 +13,7 @@ class MultiModalRetrievalModel(nn.Module):
         self,
         joint_dim:    int = 256,
         num_heads:    int = 4,
-        num_classes:  int = 14,
+        num_classes:  int = 22,
         fusion_type:  str = "cross",
         swin_name:    str = "swin_base_patch4_window7_224",
         bert_name:    str = "emilyalsentzer/Bio_ClinicalBERT",

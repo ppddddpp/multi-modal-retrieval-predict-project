@@ -7,7 +7,7 @@ import torch.nn as nn
 from tqdm import tqdm
 from pathlib import Path
 from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve, precision_score, recall_score, accuracy_score
-from transformers import get_scheduler
+from transformers import get_cosine_schedule_with_warmup
 from dataParser import parse_openi_xml
 from model import MultiModalRetrievalModel
 from dataLoader import build_dataloader
@@ -20,13 +20,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Config ---
-EPOCHS = 2
-PATIENCE = 5
-BATCH_SIZE = 1
+EPOCHS = 2              # Number of training epochs : 30
+PATIENCE = 10 
+BATCH_SIZE = 1          # Batch size for training : 4
 LR = 2e-5
-USE_FOCAL = False  # Toggle between BCEWithLogits and FocalLoss
+USE_FOCAL = True  # Toggle between BCEWithLogits and FocalLoss
 FUSION_TYPE = "cross"
-JOINT_DIM = 256
+JOINT_DIM = 256         # Dimensionality of the joint embedding 768                      
 
 # --- Hyperparameters ---
 temperature = 0.07
@@ -44,10 +44,12 @@ SPLIT_DIR = BASE_DIR / 'splited_data'
 MODEL_DIR = BASE_DIR / 'models'
 CHECKPOINT_DIR = BASE_DIR / 'checkpoints'
 EMBED_SAVE_PATH = BASE_DIR / 'embeddings'
+ATTN_DIR = BASE_DIR / 'attention_maps'
 CSV_EVAL_SAVE_PATH = BASE_DIR / 'eval_csvs'
 CSV_EVAL_SAVE_PATH.mkdir(exist_ok=True)
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 EMBED_SAVE_PATH.mkdir(exist_ok=True)
+ATTN_DIR.mkdir(exist_ok=True)
 os.environ['TRANSFORMERS_CACHE'] = str(MODEL_DIR)
 label_cols = list(disease_groups.keys()) + list(normal_groups.keys())
 
@@ -79,7 +81,7 @@ class FocalLoss(nn.Module):
 # --- Evaluation ---
 def evaluate(model, loader):
     model.eval()
-    all_labels, all_logits, all_ids, all_embs = [], [], [], []
+    all_labels, all_logits, all_ids, all_embs,all_attns = [], [], [], [], []
 
     with torch.no_grad():
         for batch in loader:
@@ -89,19 +91,20 @@ def evaluate(model, loader):
             labels = batch['labels'].cpu().numpy()
             id_list = batch['id']
 
-            joint_emb, logits, _ = model(imgs, ids, mask, return_attention=False)
+            joint_emb, logits, attn_weights = model(imgs, ids, mask, return_attention=True)
             probs = torch.sigmoid(logits).cpu().numpy()
 
             all_labels.append(labels)
             all_logits.append(probs)
             all_ids.extend(id_list)
             all_embs.append(joint_emb.cpu())
+            all_attns.append(attn_weights.cpu())
 
     y_true = np.vstack(all_labels)
     y_pred = np.vstack(all_logits)
     embeddings = torch.cat(all_embs).numpy()
     
-    return y_true, y_pred, embeddings, all_ids
+    return y_true, y_pred, embeddings, all_ids, all_attns
 
 def find_best_thresholds(y_true, y_logits):
     best_ts = []
@@ -242,7 +245,11 @@ if __name__ == '__main__':
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
     total_steps = EPOCHS * len(train_loader)
-    scheduler = get_scheduler("linear", optimizer,  num_warmup_steps=0, num_training_steps=total_steps)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=int(0.1 * total_steps),   # e.g. 10% warmup
+        num_training_steps=total_steps
+    )
 
     # --- wandb init ---
     wandb.init(project=project_name, config={
@@ -283,7 +290,7 @@ if __name__ == '__main__':
             optimizer.zero_grad()
 
             # joint_emb: (B, joint_dim), logits: (B, num_classes)
-            joint_emb, logits, _ = model(imgs, ids, mask, return_attention=False)
+            joint_emb, logits, attn_weights = model(imgs, ids, mask, return_attention=False)
 
             # Classification loss
             cls_loss = criterion(logits, labels)
@@ -305,7 +312,7 @@ if __name__ == '__main__':
             epoch_loss += loss.item()
 
         # --- Validation & threshold tuning ---
-        y_true, y_pred, val_embs, val_ids = evaluate(model, val_loader)
+        y_true, y_pred, val_embs, val_ids, val_attns = evaluate(model, val_loader)
         best_ts = find_best_thresholds(y_true, y_pred)
         y_bin = (y_pred > best_ts[None,:]).astype(int)
         
@@ -347,6 +354,7 @@ if __name__ == '__main__':
             patience_counter = 0
             torch.save(model.state_dict(), CHECKPOINT_DIR / "model_best.pt")
             np.save(EMBED_SAVE_PATH / "val_joint_embeddings.npy", val_embs)
+            torch.save(val_attns, ATTN_DIR / "val_attn_weights.npy")
             with open(EMBED_SAVE_PATH / "val_ids.json", "w") as f:
                 json.dump(val_ids, f)
         else:
@@ -356,8 +364,38 @@ if __name__ == '__main__':
                 break
 
     # Always save last val embeddings (even if not best)
-    val_auc, val_f1, class_auc, class_f1, val_embs, val_ids, _, _ = evaluate(model, val_loader)
+    y_true, y_pred, val_embs, val_ids, val_attns = evaluate(model, val_loader)
+    best_ts = find_best_thresholds(y_true, y_pred)
+    y_bin = (y_pred > best_ts[None,:]).astype(int)
+
+    val_metrics = {
+            'val_auc':       roc_auc_score(y_true, y_pred, average='macro'),
+            'val_f1':        f1_score(y_true, y_bin, average='macro'),
+            'val_precision': precision_score(y_true, y_bin, average='macro', zero_division=0),
+            'val_recall':    recall_score(y_true, y_bin, average='macro', zero_division=0),
+            'val_accuracy':  accuracy_score(y_true, y_bin),
+            'epoch':         epoch+1
+        }
+
+        # per-class metrics
+    class_aucs = roc_auc_score(y_true, y_pred, average=None)
+    class_f1s  = f1_score(y_true, y_bin, average=None)
+    class_precs= precision_score(y_true, y_bin, average=None, zero_division=0)
+    class_recs = recall_score(y_true, y_bin, average=None, zero_division=0)
+
+    for i, cn in enumerate(label_cols):
+        val_metrics[f'val_auc_{cn}'] = class_aucs[i]
+        val_metrics[f'val_f1_{cn}'] = class_f1s[i]
+        val_metrics[f'val_prec_{cn}'] = class_precs[i]
+        val_metrics[f'val_rec_{cn}'] = class_recs[i]
+
+    df_eval = pd.DataFrame({'id': val_ids})
+    for i, cn in enumerate(label_cols):
+        df_eval[f'true_{cn}'] = y_true[:, i]
+        df_eval[f'pred_{cn}'] = y_pred[:, i]
+    df_eval.to_csv(CSV_EVAL_SAVE_PATH / "eval_last.csv", index=False)
     np.save(EMBED_SAVE_PATH / "val_last_embeddings.npy", val_embs)
+    torch.save(val_attns, ATTN_DIR / "val_last_attn_weights.npy")
     with open(EMBED_SAVE_PATH / "val_last_ids.json", "w") as f:
         json.dump(val_ids, f)
 
@@ -366,8 +404,10 @@ if __name__ == '__main__':
     # Load best model (ensure embeddings align with what val set saw)
     model.load_state_dict(torch.load(CHECKPOINT_DIR / "model_best.pt"))
     model.eval()
-    train_auc, train_f1, class_auc, class_f1, train_embs, train_ids, y_true, y_pred = evaluate(model, train_loader)
+    y_true, y_pred, train_embs, train_ids, train_attns = evaluate(model, train_loader)
     np.save(EMBED_SAVE_PATH / "train_joint_embeddings.npy", train_embs)
+    torch.save(train_attns, ATTN_DIR / "train_attn_weights.npy")
+
     with open(EMBED_SAVE_PATH / "train_ids.json", "w") as f:
         json.dump(train_ids, f)
 

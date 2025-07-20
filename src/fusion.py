@@ -65,7 +65,7 @@ class Backbones(nn.Module):
 
             # load with strict=False to ignore missing / unexpected
             missing, unexpected = self.swin.load_state_dict(filtered, strict=False)
-            print(f"[Info] [fusion.py] Swin loaded – missing keys: {missing}, unexpected keys: {unexpected}")
+            print(f"[Info] [fusion.py] Swin loaded from {swin_checkpoint_path}, missing keys: {missing}, unexpected keys: {unexpected}")
             
         elif pretrained:
             # if no local checkpoint, let timm download / cache normally
