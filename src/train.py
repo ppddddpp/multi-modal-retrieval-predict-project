@@ -6,7 +6,7 @@ import pandas as pd
 import torch.nn as nn
 from tqdm import tqdm
 from pathlib import Path
-from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve
+from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve, precision_score, recall_score, accuracy_score
 from transformers import get_scheduler
 from dataParser import parse_openi_xml
 from model import MultiModalRetrievalModel
@@ -14,6 +14,7 @@ from dataLoader import build_dataloader
 from torch.utils.data import WeightedRandomSampler
 from labeledData import disease_groups, normal_groups
 import wandb
+import pandas as pd
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -33,7 +34,7 @@ cls_weight   = 1.0                  # focuses on getting the labels right (1.0 i
 cont_weight  = 0.5                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
 # --- Wandb ---
-project_name = "multimodal-disease-classification-test-1907"
+project_name = "multimodal-disease-classification-debug-2007"
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -43,6 +44,8 @@ SPLIT_DIR = BASE_DIR / 'splited_data'
 MODEL_DIR = BASE_DIR / 'models'
 CHECKPOINT_DIR = BASE_DIR / 'checkpoints'
 EMBED_SAVE_PATH = BASE_DIR / 'embeddings'
+CSV_EVAL_SAVE_PATH = BASE_DIR / 'eval_csvs'
+CSV_EVAL_SAVE_PATH.mkdir(exist_ok=True)
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 EMBED_SAVE_PATH.mkdir(exist_ok=True)
 os.environ['TRANSFORMERS_CACHE'] = str(MODEL_DIR)
@@ -256,7 +259,18 @@ if __name__ == '__main__':
         "loss": "focal" if USE_FOCAL else "BCEWithLogits",
         "fusion": FUSION_TYPE
     })
+    wandb.define_metric("epoch")
+    wandb.define_metric("val_precision", step_metric="epoch")
+    wandb.define_metric("val_recall",    step_metric="epoch")
+    wandb.define_metric("val_accuracy",  step_metric="epoch")
 
+    for cn in label_cols:
+        wandb.define_metric(f"val_auc_{cn}", step_metric="epoch")
+        wandb.define_metric(f"val_f1_{cn}",  step_metric="epoch")
+        wandb.define_metric(f"val_prec_{cn}",  step_metric="epoch")
+        wandb.define_metric(f"val_rec_{cn}",   step_metric="epoch")
+
+    
     # --- Early stopping ---
     best_f1 = 0
     best_auc = 0
@@ -303,19 +317,58 @@ if __name__ == '__main__':
         best_thresh = find_best_thresholds(y_true, y_pred)
         val_preds = (y_pred > best_thresh[None, :]).astype(int)
         tuned_f1 = f1_score(y_true, val_preds, average='macro')
+        macro_precision = precision_score(y_true, val_preds, average='macro')
+        macro_recall    = recall_score(y_true, val_preds, average='macro')
+        accuracy        = accuracy_score(y_true, val_preds)
+
+        # per‐class precision & recall
+        class_prec = precision_score(y_true, val_preds, average=None, zero_division=0)
+        class_rec  = recall_score(   y_true, val_preds, average=None, zero_division=0)
 
         metrics = {
-            "train_loss": epoch_loss / len(train_loader),
-            "val_auc":    val_auc,
-            "val_f1":     tuned_f1,
-            "epoch": epoch+1,
-            # per‑class AUC/F1:
-            **{f"val_auc_{cn}": a for cn, a in zip(label_cols, class_auc)},
-            **{f"val_f1_{cn}": f for cn, f in zip(label_cols, class_f1)},
+            "train_loss": float(epoch_loss / len(train_loader)),
+            "val_auc":    float(val_auc),
+            "val_f1":     float(tuned_f1),
+            "val_precision": float(macro_precision),
+            "val_recall":    float(macro_recall),
+            "val_accuracy":  float(accuracy),
+            "epoch":      epoch+1,
+            # per‐class AUC/F1 as native floats
+            **{
+                f"val_auc_{cn}": float(a)
+                for cn, a in zip(label_cols, class_auc)
+            },
+            **{
+                f"val_f1_{cn}": float(f1)
+                for cn, f1 in zip(label_cols, class_f1)
+            },
+            **{ 
+                f"val_prec_{cn}": float(p) 
+                for cn, p in zip(label_cols, class_prec) 
+            },
+            **{ 
+                f"val_rec_{cn}":  float(r) 
+                for cn, r in zip(label_cols, class_rec) 
+            },
         }
         wandb.log(metrics, step=epoch + 1)
 
         print(f"Epoch {epoch+1} | Loss: {epoch_loss / len(train_loader):.4f} | Val AUC: {val_auc:.4f} | Val F1: {tuned_f1:.4f}")
+
+        # Save evaluation results to CSV
+        df_ids = pd.DataFrame({"id": val_ids})
+        df_true = pd.DataFrame(y_true, columns=[f"true_{c}" for c in label_cols])
+        df_pred = pd.DataFrame(y_pred, columns=[f"pred_{c}" for c in label_cols])
+
+        df_eval = pd.concat([df_ids, df_true, df_pred], axis=1)
+
+        # write it out
+        eval_path = CSV_EVAL_SAVE_PATH / f"eval_epoch_{epoch+1}.csv"
+        df_eval.to_csv(eval_path, index=False)
+        artifact = wandb.Artifact("eval-data", type="dataset")
+        artifact.add_file(str(eval_path))
+        wandb.log_artifact(artifact)
+        print(f"Saved evaluation results to {eval_path}")
 
         # --- Checkpointing & early stop ---
         torch.save(model.state_dict(), CHECKPOINT_DIR / f"model_epoch_{epoch+1}.pt")
