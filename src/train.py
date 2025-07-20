@@ -86,7 +86,6 @@ def evaluate(model, loader):
             imgs = batch['image'].cuda()
             ids = batch['input_ids'].cuda()
             mask = batch['attn_mask'].cuda()
-
             labels = batch['labels'].cpu().numpy()
             id_list = batch['id']
 
@@ -100,15 +99,9 @@ def evaluate(model, loader):
 
     y_true = np.vstack(all_labels)
     y_pred = np.vstack(all_logits)
-    emb_array = torch.cat(all_embs).numpy()
-
-    macro_auc = roc_auc_score(y_true, y_pred, average='macro')
-    macro_f1 = f1_score((y_true > 0.5).astype(int), (y_pred > 0.5).astype(int), average='macro')
-
-    class_auc = roc_auc_score(y_true, y_pred, average=None)
-    class_f1 = f1_score((y_true > 0.5).astype(int), (y_pred > 0.5).astype(int), average=None)
-
-    return macro_auc, macro_f1, class_auc, class_f1, emb_array, all_ids, y_true, y_pred
+    embeddings = torch.cat(all_embs).numpy()
+    
+    return y_true, y_pred, embeddings, all_ids
 
 def find_best_thresholds(y_true, y_logits):
     best_ts = []
@@ -312,69 +305,45 @@ if __name__ == '__main__':
             epoch_loss += loss.item()
 
         # --- Validation & threshold tuning ---
-        val_auc, val_f1, class_auc, class_f1, val_embs, val_ids, y_true, y_pred = evaluate(model, val_loader)
+        y_true, y_pred, val_embs, val_ids = evaluate(model, val_loader)
+        best_ts = find_best_thresholds(y_true, y_pred)
+        y_bin = (y_pred > best_ts[None,:]).astype(int)
         
-        best_thresh = find_best_thresholds(y_true, y_pred)
-        val_preds = (y_pred > best_thresh[None, :]).astype(int)
-        tuned_f1 = f1_score(y_true, val_preds, average='macro')
-        macro_precision = precision_score(y_true, val_preds, average='macro')
-        macro_recall    = recall_score(y_true, val_preds, average='macro')
-        accuracy        = accuracy_score(y_true, val_preds)
-
-        # per‐class precision & recall
-        class_prec = precision_score(y_true, val_preds, average=None, zero_division=0)
-        class_rec  = recall_score(   y_true, val_preds, average=None, zero_division=0)
-
-        metrics = {
-            "train_loss": float(epoch_loss / len(train_loader)),
-            "val_auc":    float(val_auc),
-            "val_f1":     float(tuned_f1),
-            "val_precision": float(macro_precision),
-            "val_recall":    float(macro_recall),
-            "val_accuracy":  float(accuracy),
-            "epoch":      epoch+1,
-            # per‐class AUC/F1 as native floats
-            **{
-                f"val_auc_{cn}": float(a)
-                for cn, a in zip(label_cols, class_auc)
-            },
-            **{
-                f"val_f1_{cn}": float(f1)
-                for cn, f1 in zip(label_cols, class_f1)
-            },
-            **{ 
-                f"val_prec_{cn}": float(p) 
-                for cn, p in zip(label_cols, class_prec) 
-            },
-            **{ 
-                f"val_rec_{cn}":  float(r) 
-                for cn, r in zip(label_cols, class_rec) 
-            },
+        # macro metrics (averaged over all classes)
+        val_metrics = {
+            'val_auc':       roc_auc_score(y_true, y_pred, average='macro'),
+            'val_f1':        f1_score(y_true, y_bin, average='macro'),
+            'val_precision': precision_score(y_true, y_bin, average='macro', zero_division=0),
+            'val_recall':    recall_score(y_true, y_bin, average='macro', zero_division=0),
+            'val_accuracy':  accuracy_score(y_true, y_bin),
+            'epoch':         epoch+1
         }
-        wandb.log(metrics, step=epoch + 1)
 
-        print(f"Epoch {epoch+1} | Loss: {epoch_loss / len(train_loader):.4f} | Val AUC: {val_auc:.4f} | Val F1: {tuned_f1:.4f}")
+        # per-class metrics
+        class_aucs = roc_auc_score(y_true, y_pred, average=None)
+        class_f1s  = f1_score(y_true, y_bin, average=None)
+        class_precs= precision_score(y_true, y_bin, average=None, zero_division=0)
+        class_recs = recall_score(y_true, y_bin, average=None, zero_division=0)
+        for i, cn in enumerate(label_cols):
+            val_metrics[f'val_auc_{cn}'] = class_aucs[i]
+            val_metrics[f'val_f1_{cn}'] = class_f1s[i]
+            val_metrics[f'val_prec_{cn}'] = class_precs[i]
+            val_metrics[f'val_rec_{cn}'] = class_recs[i]
 
-        # Save evaluation results to CSV
-        df_ids = pd.DataFrame({"id": val_ids})
-        df_true = pd.DataFrame(y_true, columns=[f"true_{c}" for c in label_cols])
-        df_pred = pd.DataFrame(y_pred, columns=[f"pred_{c}" for c in label_cols])
+        wandb.log(val_metrics)
 
-        df_eval = pd.concat([df_ids, df_true, df_pred], axis=1)
-
-        # write it out
-        eval_path = CSV_EVAL_SAVE_PATH / f"eval_epoch_{epoch+1}.csv"
-        df_eval.to_csv(eval_path, index=False)
-        artifact = wandb.Artifact("eval-data", type="dataset")
-        artifact.add_file(str(eval_path))
-        wandb.log_artifact(artifact)
-        print(f"Saved evaluation results to {eval_path}")
+        # save CSV for EDA
+        df_eval = pd.DataFrame({'id': val_ids})
+        for i, cn in enumerate(label_cols):
+            df_eval[f'true_{cn}'] = y_true[:,i]
+            df_eval[f'pred_{cn}'] = y_pred[:,i]
+        df_eval.to_csv(CSV_EVAL_SAVE_PATH/f"eval_epoch_{epoch}.csv", index=False)
 
         # --- Checkpointing & early stop ---
         torch.save(model.state_dict(), CHECKPOINT_DIR / f"model_epoch_{epoch+1}.pt")
 
-        if val_auc > best_auc:
-            best_auc = val_auc
+        if val_metrics['val_auc'] > best_auc:
+            best_auc = val_metrics['val_auc']
             patience_counter = 0
             torch.save(model.state_dict(), CHECKPOINT_DIR / "model_best.pt")
             np.save(EMBED_SAVE_PATH / "val_joint_embeddings.npy", val_embs)
