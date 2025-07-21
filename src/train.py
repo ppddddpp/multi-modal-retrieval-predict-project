@@ -20,21 +20,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Config ---
-EPOCHS = 2              # Number of training epochs : 30
+EPOCHS = 30              # Number of training epochs : 30
 PATIENCE = 10 
-BATCH_SIZE = 1          # Batch size for training : 4
+BATCH_SIZE = 4          # Batch size for training : 4
 LR = 2e-5
 USE_FOCAL = True  # Toggle between BCEWithLogits and FocalLoss
 FUSION_TYPE = "cross"
-JOINT_DIM = 256         # Dimensionality of the joint embedding 768                      
+JOINT_DIM = 768         # Dimensionality of the joint embedding 768                      
 
 # --- Hyperparameters ---
-temperature = 0.07
+temperature = 0.125
 cls_weight   = 1.0                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
 cont_weight  = 0.5                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
 # --- Wandb ---
-project_name = "multimodal-disease-classification-2107"
+project_name = "multimodal-disease-classification-2107-11h10m"
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -213,9 +213,9 @@ if __name__ == '__main__':
     train_loader = build_dataloader(
         train_records,
         batch_size=BATCH_SIZE,
-        mean=0.5, std=0.25,
-        sampler=sampler
+        mean=0.5, std=0.25
     )
+    #sampler=sampler
     val_loader = build_dataloader(
         val_records,
         batch_size=BATCH_SIZE,
@@ -316,6 +316,9 @@ if __name__ == '__main__':
         # --- Validation & threshold tuning ---
         y_true, y_pred, val_embs, val_ids, val_attns = evaluate(model, val_loader)
         best_ts = find_best_thresholds(y_true, y_pred)
+        for i, cn in enumerate(label_cols):
+            wandb.log({f"thresh_{cn}": float(best_ts[i]), "epoch": epoch+1})
+
         y_bin = (y_pred > best_ts[None,:]).astype(int)
         
         # macro metrics (averaged over all classes)
@@ -351,8 +354,8 @@ if __name__ == '__main__':
         # --- Checkpointing & early stop ---
         torch.save(model.state_dict(), CHECKPOINT_DIR / f"model_epoch_{epoch+1}.pt")
 
-        if val_metrics['val_auc'] > best_auc:
-            best_auc = val_metrics['val_auc']
+        if val_metrics['val_f1'] > best_f1:
+            best_f1 = val_metrics['val_f1']
             patience_counter = 0
             torch.save(model.state_dict(), CHECKPOINT_DIR / "model_best.pt")
             np.save(EMBED_SAVE_PATH / "val_joint_embeddings.npy", val_embs)
