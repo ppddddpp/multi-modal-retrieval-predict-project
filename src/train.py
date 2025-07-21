@@ -39,7 +39,8 @@ cls_weight   = 1.0                  # focuses on getting the labels right (1.0 i
 cont_weight  = 0.5                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
 # --- Wandb ---
-project_name = "multimodal-disease-classification-2107-17h40m"
+project_name = "multimodal-disease-classification-2107-11h15m"
+name = "hybrid_07focal"  # Name of the run in wandb
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -269,7 +270,7 @@ if __name__ == '__main__':
     )
 
     # --- wandb init ---
-    wandb.init(project=project_name, config={
+    wandb.init(project=project_name, name = run_name, config={
         "epochs": EPOCHS,
         "lr": LR,
         "batch_size": BATCH_SIZE,
