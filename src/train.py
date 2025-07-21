@@ -20,13 +20,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Config ---
-EPOCHS = 30              # Number of training epochs : 30
+EPOCHS = 1              # Number of training epochs : 30
 PATIENCE = 10 
-BATCH_SIZE = 4          # Batch size for training : 4
+BATCH_SIZE = 1          # Batch size for training : 4
 LR = 2e-5
-USE_FOCAL = True  # Toggle between BCEWithLogits and FocalLoss
+USE_FOCAL = False  # Toggle between BCEWithLogits and FocalLoss
+USE_HYBRID = True  # Toggle between BCEWithLogits + FocalLoss
 FUSION_TYPE = "cross"
-JOINT_DIM = 768         # Dimensionality of the joint embedding 768                      
+JOINT_DIM = 768         # Dimensionality of the joint embedding 768
+
+# --- Loss parameters ---
+gamma_FOCAL = 1        # Focal loss gamma parameter
+FOCAL_RATIO = 0.7              # Ratio of focal loss in hybrid loss (if USE_HYBRID is True), BCE_RATIO = 1 - FOCAL_RATIO
 
 # --- Hyperparameters ---
 temperature = 0.125
@@ -34,7 +39,7 @@ cls_weight   = 1.0                  # focuses on getting the labels right (1.0 i
 cont_weight  = 0.5                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
 # --- Wandb ---
-project_name = "multimodal-disease-classification-2107-11h10m"
+project_name = "multimodal-disease-classification-2107-17h40m"
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -71,8 +76,8 @@ class FocalLoss(nn.Module):
 
     def forward(self, logits, targets):
         bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-        probs = torch.sigmoid(logits)
-        focal_weight = (1 - probs) ** self.gamma
+        probs = torch.sigmoid(logits).clamp(min=1e-6, max=1-1e-6)
+        focal_weight = (1 - probs).clamp(min=1e-6) ** self.gamma
         loss = focal_weight * bce
         if self.alpha is not None:
             loss = self.alpha * loss
@@ -192,16 +197,14 @@ if __name__ == '__main__':
     label_sums = np.zeros(len(label_cols), dtype=float)
     for r in train_records:
         label_sums += np.array(r['labels'], dtype=float)
-    pos_freq = label_sums / len(train_records)
-
-    # --- per‐label weight = 1 / freq (clipped) ---
-    label_weights = 1.0 / np.clip(pos_freq, 1e-3, None)
-
+    pos_freq_np = label_sums / len(train_records)
+    
     # --- per‐sample weights for sampler ---
+    inv_freq = 1.0 / pos_freq_np.clip(min=1e-3)
     sample_weights = []
     for r in train_records:
-        lv = np.array(r['labels'], dtype=float)
-        sample_weights.append((lv * label_weights).sum())
+        label_vec = np.array(r['labels'], dtype=float)
+        sample_weights.append((label_vec * inv_freq).sum())
 
     sampler = WeightedRandomSampler(
         sample_weights,
@@ -213,9 +216,10 @@ if __name__ == '__main__':
     train_loader = build_dataloader(
         train_records,
         batch_size=BATCH_SIZE,
-        mean=0.5, std=0.25
+        mean=0.5, std=0.25,
+        sampler=sampler
     )
-    #sampler=sampler
+
     val_loader = build_dataloader(
         val_records,
         batch_size=BATCH_SIZE,
@@ -224,15 +228,26 @@ if __name__ == '__main__':
 
     # --- Loss weights & criterion ---
     label_counts = np.array([r['labels'] for r in train_records]).sum(axis=0)
-    pos_weight = 1.0 / torch.tensor(label_counts, dtype=torch.float32).clamp(min=1)
+    num_samples  = len(train_records)   
+    pos_weight = ((num_samples - torch.tensor(label_counts)) / torch.tensor(label_counts)).to(device)
+    pos_weight = torch.clamp(pos_weight, min=1.0)  # Ensure no zero weights
     pos_weight = pos_weight.cuda()
 
+    # Inverse frequency for Focal Loss
+    pos_freq_t = torch.tensor(pos_freq_np, dtype=torch.float32).to(device)
+    inv_freq = 1.0 / pos_freq_t.clamp(min=1e-3)  
+    alpha    = (inv_freq / inv_freq.sum()).to(device)
+    alpha = alpha.clamp(min=1e-4)
+
     if USE_FOCAL:
-        # compute alpha for focal
-        alpha = torch.tensor(label_weights, dtype=torch.float32)
-        alpha = alpha / alpha.sum()
         alpha = alpha.to(device)
-        criterion = FocalLoss(gamma=2, alpha=alpha)
+        criterion = FocalLoss(gamma=gamma_FOCAL, alpha=alpha)
+    elif USE_HYBRID:
+        # --- Hybrid BCE + Focal ---
+        bce   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        alpha = torch.tensor(inv_freq, dtype=torch.float32).to(device)
+        focal = FocalLoss(gamma=gamma_FOCAL, alpha=alpha)
+        criterion = lambda logits, labels: (1 - FOCAL_RATIO) * bce(logits, labels) + FOCAL_RATIO * focal(logits, labels)
     else:
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
@@ -272,7 +287,11 @@ if __name__ == '__main__':
         wandb.define_metric(f"val_prec_{cn}",  step_metric="epoch")
         wandb.define_metric(f"val_rec_{cn}",   step_metric="epoch")
 
-    
+    labels = torch.tensor([r['labels'] for r in train_records], dtype=torch.float32).to(device)
+    batch_labels = labels.mean(dim=0).cpu().numpy()
+    wandb.log({f"batch_pos_freq/{cn}": float(batch_labels[i]) 
+            for i, cn in enumerate(label_cols)}, step=0)
+
     # --- Early stopping ---
     best_f1 = 0
     best_auc = 0

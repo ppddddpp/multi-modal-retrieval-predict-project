@@ -199,8 +199,10 @@ data_phrase_check.ipynb
 dataEDAnLabeledCheck.ipynb
 finalOutputDataEDA.ipynb
 
-# Ignore additional files
+# Ignore additional files and folders
 cudaCheck.ipynb
 wandb
 embeddings
 checkpoints
+attention_maps
+eval_csvs
