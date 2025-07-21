@@ -34,7 +34,7 @@ cls_weight   = 1.0                  # focuses on getting the labels right (1.0 i
 cont_weight  = 0.5                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
 # --- Wandb ---
-project_name = "multimodal-disease-classification-debug-2007"
+project_name = "multimodal-disease-classification-2107"
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -98,7 +98,9 @@ def evaluate(model, loader):
             all_logits.append(probs)
             all_ids.extend(id_list)
             all_embs.append(joint_emb.cpu())
-            all_attns.append(attn_weights.cpu())
+            
+            attn_cpu = {k: v.detach().cpu() for k, v in attn_weights.items()}
+            all_attns.append(attn_cpu)
 
     y_true = np.vstack(all_labels)
     y_pred = np.vstack(all_logits)
