@@ -20,10 +20,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Config ---
-EPOCHS = 1              # Number of training epochs : 30
+EPOCHS = 30              # Number of training epochs : 30
 PATIENCE = 10 
 BATCH_SIZE = 1          # Batch size for training : 4
-LR = 2e-5
+LR = 2e-5               # LR = baseLR * sqrt(newBatchSize / baseBatchSize) = 2e-5 * sqrt(4 / 1) = 4e-5
 USE_FOCAL = False  # Toggle between BCEWithLogits and FocalLoss
 USE_HYBRID = True  # Toggle between BCEWithLogits + FocalLoss
 FUSION_TYPE = "cross"
@@ -31,16 +31,16 @@ JOINT_DIM = 768         # Dimensionality of the joint embedding 768
 
 # --- Loss parameters ---
 gamma_FOCAL = 1        # Focal loss gamma parameter
-FOCAL_RATIO = 0.7              # Ratio of focal loss in hybrid loss (if USE_HYBRID is True), BCE_RATIO = 1 - FOCAL_RATIO
+FOCAL_RATIO = 0.3              # Ratio of focal loss in hybrid loss (if USE_HYBRID is True), BCE_RATIO = 1 - FOCAL_RATIO
 
 # --- Hyperparameters ---
 temperature = 0.125
-cls_weight   = 1.0                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
-cont_weight  = 0.5                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
+cls_weight   = 1.5                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
+cont_weight  = 0.3                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
 # --- Wandb ---
-project_name = "multimodal-disease-classification-2107-11h15m"
-name = "hybrid_07focal"  # Name of the run in wandb
+project_name = "multimodal-disease-classification-2207"
+run_name = "hybrid_focal0.3_b1_lr2e-5_temp0.125_joint768_cls1.5_cont0.3"  # Name of the run in wandb
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -265,7 +265,7 @@ if __name__ == '__main__':
     total_steps = EPOCHS * len(train_loader)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=int(0.1 * total_steps),   # e.g. 10% warmup
+        num_warmup_steps=int(0.1 * total_steps),   # 10% warmup
         num_training_steps=total_steps
     )
 
@@ -303,7 +303,7 @@ if __name__ == '__main__':
     for epoch in range(EPOCHS):
         model.train()
         epoch_loss = 0
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
             imgs = batch['image'].cuda()
             ids = batch['input_ids'].cuda()
             mask = batch['attn_mask'].cuda()
@@ -332,8 +332,18 @@ if __name__ == '__main__':
             scheduler.step()
 
             epoch_loss += loss.item()
+            wandb.log({
+                "batch_train_loss": loss.item(),
+                "epoch": epoch + 1,
+                "batch_idx": batch_idx
+            })
 
         # --- Validation & threshold tuning ---
+        avg_train_loss = epoch_loss / len(train_loader)
+        wandb.log({
+            "train_loss": avg_train_loss,
+            "epoch": epoch + 1
+        })
         y_true, y_pred, val_embs, val_ids, val_attns = evaluate(model, val_loader)
         best_ts = find_best_thresholds(y_true, y_pred)
         for i, cn in enumerate(label_cols):
