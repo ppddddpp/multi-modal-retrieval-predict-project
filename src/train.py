@@ -20,27 +20,27 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Config ---
-EPOCHS = 30              # Number of training epochs : 30
+EPOCHS = 50
 PATIENCE = 10 
-BATCH_SIZE = 1          # Batch size for training : 4
-LR = 2e-5               # LR = baseLR * sqrt(newBatchSize / baseBatchSize) = 2e-5 * sqrt(4 / 1) = 4e-5
+BATCH_SIZE = 1
+LR = 2e-5
 USE_FOCAL = False  # Toggle between BCEWithLogits and FocalLoss
 USE_HYBRID = True  # Toggle between BCEWithLogits + FocalLoss
 FUSION_TYPE = "cross"
-JOINT_DIM = 768         # Dimensionality of the joint embedding 768
+JOINT_DIM = 1024
 
 # --- Loss parameters ---
-gamma_FOCAL = 1        # Focal loss gamma parameter
+gamma_FOCAL = 1                # Focal loss gamma parameter
 FOCAL_RATIO = 0.3              # Ratio of focal loss in hybrid loss (if USE_HYBRID is True), BCE_RATIO = 1 - FOCAL_RATIO
 
 # --- Hyperparameters ---
-temperature = 0.125
+temperature = 0.0875                # temperature for contrastive loss
 cls_weight   = 1.5                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
 cont_weight  = 0.3                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
 # --- Wandb ---
 project_name = "multimodal-disease-classification-2207"
-run_name = "hybrid_focal0.3_b1_lr2e-5_temp0.125_joint768_cls1.5_cont0.3"  # Name of the run in wandb
+run_name = "hybrid_focal0.3_b1_lr2e-5_temp0.0875_joint1024_cls1.5_cont0.3"
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -436,7 +436,8 @@ if __name__ == '__main__':
 
     print("Training complete.")
     print("Saving train joint embeddings...")
-    # Load best model (ensure embeddings align with what val set saw)
+
+    # Load best model and save train embeddings
     model.load_state_dict(torch.load(CHECKPOINT_DIR / "model_best.pt"))
     model.eval()
     y_true, y_pred, train_embs, train_ids, train_attns = evaluate(model, train_loader)
