@@ -34,13 +34,13 @@ gamma_FOCAL = 1                # Focal loss gamma parameter
 FOCAL_RATIO = 0.3              # Ratio of focal loss in hybrid loss (if USE_HYBRID is True), BCE_RATIO = 1 - FOCAL_RATIO
 
 # --- Hyperparameters ---
-temperature = 0.05                # temperature for contrastive loss
+temperature = 0.125                # temperature for contrastive loss
 cls_weight   = 1.5                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
 cont_weight  = 0.3                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 
 # --- Wandb ---
 project_name = "multimodal-disease-classification-2207"
-run_name = "hybrid_focal0.3_b1_lr2e-5_temp0.05_joint1024_cls1.5_cont0.3"
+run_name = "hybrid_focal0.3_b1_lr2e-5_temp0.125_joint1024_cls1.5_cont0.3"
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
