@@ -7,7 +7,7 @@ class RetrievalEngine:
         self,
         features_path: str,
         ids_path: str,
-        method: Literal["dls"] = "faiss",
+        method: Literal["dls"] = "dls",
         dls_link_thresh: float = 0.5,
         dls_max_links: int = 10
     ):
