@@ -5,6 +5,9 @@ from fusion import CrossModalFusion, Backbones
 from retrieval import RetrievalEngine
 from pathlib import Path
 from explain import ExplanationEngine
+import os
+import numpy as np
+import json
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 EMBEDDINGS_DIR = BASE_DIR / "embeddings"
@@ -93,27 +96,33 @@ class MultiModalRetrievalModel(nn.Module):
         if not training:
             if not features_path.exists() or not ids_path.exists():
                 raise FileNotFoundError(f"Expected embeddings at {features_path} and IDs at {ids_path}")
+            
+            if checkpoint_path:
+                state = torch.load(checkpoint_path, map_location=device)
+                self.load_state_dict(state)
+                self.to(device)
+                self.eval()
+
+            self.retriever = RetrievalEngine(
+                features_path=str(features_path),
+                ids_path=str(ids_path)
+            )
+
+            # set up explanation 
+            self.explainer   = None
+            self.ig_steps    = 100
+            self.image_size  = (224,224)
+
         else:
             # during training, we can use a dummy path
             features_path = EMBEDDINGS_DIR / "dummy_embeddings.npy"
             ids_path      = EMBEDDINGS_DIR / "dummy_ids.json"
+            if not features_path.exists() or not ids_path.exists():
+                np.save(features_path, np.zeros((1, joint_dim), dtype=np.float32))
+                with open(ids_path, "w") as f:
+                    json.dump(["dummy_id"], f)
             
-        self.retriever = RetrievalEngine(
-            features_path=str(features_path),
-            ids_path=str(ids_path)
-        )
-
-        # set up explanation 
-        self.explainer   = None
-        self.ig_steps    = 100
-        self.image_size  = (224,224)
-
-        # load checkpoint if provided
-        if checkpoint_path:
-            state = torch.load(checkpoint_path, map_location=device)
-            self.load_state_dict(state)
-            self.to(device)
-            self.eval()
+            self.retriever = None
 
     def forward(self, image, input_ids, attention_mask, return_attention=False):
         """
