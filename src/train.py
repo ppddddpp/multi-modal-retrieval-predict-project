@@ -15,32 +15,9 @@ from torch.utils.data import WeightedRandomSampler
 from labeledData import disease_groups, normal_groups
 import wandb
 import pandas as pd
-
+from config import Config
 from dotenv import load_dotenv
 load_dotenv()
-
-# --- Config ---
-EPOCHS = 50
-PATIENCE = 10 
-BATCH_SIZE = 1
-LR = 2e-5
-USE_FOCAL = False  # Toggle between BCEWithLogits and FocalLoss
-USE_HYBRID = True  # Toggle between BCEWithLogits + FocalLoss
-FUSION_TYPE = "cross"
-JOINT_DIM = 1024
-
-# --- Loss parameters ---
-gamma_FOCAL = 1                # Focal loss gamma parameter
-FOCAL_RATIO = 0.3              # Ratio of focal loss in hybrid loss (if USE_HYBRID is True), BCE_RATIO = 1 - FOCAL_RATIO
-
-# --- Hyperparameters ---
-temperature = 0.125                # temperature for contrastive loss
-cls_weight   = 1.5                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
-cont_weight  = 0.3                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
-
-# --- Wandb ---
-project_name = "multimodal-disease-classification-2207"
-run_name = "hybrid_focal0.3_b1_lr2e-5_temp0.125_joint1024_cls1.5_cont0.3"
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -52,12 +29,38 @@ CHECKPOINT_DIR = BASE_DIR / 'checkpoints'
 EMBED_SAVE_PATH = BASE_DIR / 'embeddings'
 ATTN_DIR = BASE_DIR / 'attention_maps'
 CSV_EVAL_SAVE_PATH = BASE_DIR / 'eval_csvs'
+CONFIG_DIR = BASE_DIR / 'configs'
 CSV_EVAL_SAVE_PATH.mkdir(exist_ok=True)
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 EMBED_SAVE_PATH.mkdir(exist_ok=True)
 ATTN_DIR.mkdir(exist_ok=True)
 os.environ['TRANSFORMERS_CACHE'] = str(MODEL_DIR)
 label_cols = list(disease_groups.keys()) + list(normal_groups.keys())
+
+# --- Config ---
+cfg = Config.load(CONFIG_DIR / 'config.yaml')
+EPOCHS = cfg.epochs
+PATIENCE = cfg.patience 
+BATCH_SIZE = cfg.batch_size
+LR = cfg.lr
+USE_FOCAL = cfg.use_focal  # Toggle between BCEWithLogits and FocalLoss
+USE_HYBRID = cfg.use_hybrid  # Toggle between BCEWithLogits + FocalLoss
+FUSION_TYPE = cfg.fusion_type
+JOINT_DIM = cfg.joint_dim
+
+# --- Loss parameters ---
+gamma_FOCAL = cfg.gamma_focal  # Focal loss gamma parameter
+FOCAL_RATIO = cfg.focal_ratio  # Ratio of focal loss in hybrid loss (if USE_HYBRID is True), BCE_RATIO = 1 - FOCAL_RATIO
+
+# --- Hyperparameters ---
+temperature = cfg.temperature                # temperature for contrastive loss
+cls_weight   = cfg.cls_weight                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
+cont_weight  = cfg.cont_weight                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
+num_heads = cfg.num_heads                     # number of attention heads in the fusion model
+
+# --- Wandb ---
+project_name = cfg.project_name
+run_name = cfg.run_name
 
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -256,9 +259,11 @@ if __name__ == '__main__':
     model = MultiModalRetrievalModel(
         joint_dim=JOINT_DIM,
         num_classes=len(label_cols),
+        num_heads=num_heads,
         fusion_type=FUSION_TYPE,
         swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
+        device=device
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
@@ -304,10 +309,10 @@ if __name__ == '__main__':
         model.train()
         epoch_loss = 0
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
-            imgs = batch['image'].cuda()
-            ids = batch['input_ids'].cuda()
-            mask = batch['attn_mask'].cuda()
-            labels = batch['labels'].cuda()
+            imgs = batch['image'].to(device)
+            ids = batch['input_ids'].to(device)
+            mask = batch['attn_mask'].to(device)
+            labels = batch['labels'].to(device)
 
             optimizer.zero_grad()
 

@@ -1,6 +1,13 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from fusion import CrossModalFusion, Backbones
+from retrieval import RetrievalEngine
+from pathlib import Path
+from explain import ExplanationEngine
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+EMBEDDINGS_DIR = BASE_DIR / "embeddings"
 
 class MultiModalRetrievalModel(nn.Module):
     """
@@ -20,6 +27,8 @@ class MultiModalRetrievalModel(nn.Module):
         swin_ckpt_path:    str = None,
         bert_local_dir:   str = None,
         pretrained:   bool = True,
+        checkpoint_path:str = None,
+        device:         torch.device = torch.device("cpu")
     ):
         """
         :param joint_dim: dimensionality of the joint embedding
@@ -31,6 +40,8 @@ class MultiModalRetrievalModel(nn.Module):
         :param swin_ckpt_path: path to a Swin transformer checkpoint to load
         :param bert_local_dir: directory containing a ClinicalBERT model to load
         :param pretrained: whether to load pre-trained weights for the Swin and ClinicalBERT models
+        :param checkpoint_path: path to a model checkpoint to load
+        :param device: device to run the model on
 
         Args:
             joint_dim (int, optional): dimensionality of the joint embedding. Defaults to 256.
@@ -42,8 +53,11 @@ class MultiModalRetrievalModel(nn.Module):
             swin_ckpt_path (str, optional): path to a Swin transformer checkpoint to load. Defaults to None.
             bert_local_dir (str, optional): directory containing a ClinicalBERT model to load. Defaults to None.
             pretrained (bool, optional): whether to load pre-trained weights for the Swin and ClinicalBERT models. Defaults to True.
+            checkpoint_path (str, optional): path to a model checkpoint to load. Defaults to None.
+            device (torch.device, optional): device to run the model on. Defaults to torch.device("cpu").
         """
         super().__init__()
+        self.device = device
 
         # instantiate vision+text backbones
         self.backbones = Backbones(
@@ -52,7 +66,7 @@ class MultiModalRetrievalModel(nn.Module):
             swin_checkpoint_path = swin_ckpt_path,
             bert_local_dir       = bert_local_dir,
             pretrained           = pretrained
-        )
+        ).to(device)
         img_dim = self.backbones.img_dim
         txt_dim = self.backbones.txt_dim
 
@@ -68,7 +82,29 @@ class MultiModalRetrievalModel(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
             nn.Linear(joint_dim//2, num_classes)
+        ).to(device)
+
+        #  Retrieval engine (offline index of embeddings)
+        features_path = EMBEDDINGS_DIR / "val_joint_embeddings.npy"
+        ids_path      = EMBEDDINGS_DIR / "val_ids.json"
+        if not features_path.exists() or not ids_path.exists():
+            raise FileNotFoundError(f"Expected embeddings at {features_path} and IDs at {ids_path}")
+        self.retriever = RetrievalEngine(
+            features_path=str(features_path),
+            ids_path=str(ids_path)
         )
+
+        # set up explanation 
+        self.explainer   = None
+        self.ig_steps    = 100
+        self.image_size  = (224,224)
+
+        # load checkpoint if provided
+        if checkpoint_path:
+            state = torch.load(checkpoint_path, map_location=device)
+            self.load_state_dict(state)
+            self.to(device)
+            self.eval()
 
     def forward(self, image, input_ids, attention_mask, return_attention=False):
         """
@@ -81,14 +117,105 @@ class MultiModalRetrievalModel(nn.Module):
           logits    (B, num_classes)
         """
         # extracting separate features
-        (img_global, img_patch), txt_feat = self.backbones(image, input_ids, attention_mask)
+        (img_global, img_patches), txt_feats = self.backbones(
+            image.to(self.device),
+            input_ids.to(self.device),
+            attention_mask.to(self.device)
+        )
 
         # fuse into shared embedding
         if return_attention:
-            joint_emb, attn_weights = self.fusion(img_global, img_patch, txt_feat, return_attention=True)
+            joint_emb, attn_weights = self.fusion(
+                img_global, img_patches, txt_feats, return_attention=True
+            )
         else:
-            joint_emb = self.fusion(img_global, img_patch, txt_feat)
+            joint_emb    = self.fusion(img_global, img_patches, txt_feats)
             attn_weights = None
+
         logits = self.classifier(joint_emb)
-        
         return joint_emb, logits, attn_weights
+
+    def predict(self,
+                image: torch.Tensor,
+                input_ids: torch.Tensor,
+                attention_mask: torch.Tensor,
+                K: int = 5,
+                explain: bool = False
+                ) -> dict:
+        
+        joint_emb, logits, attn_weights = self.forward(
+            image, input_ids, attention_mask, return_attention=explain
+        )
+
+        # probabilities (softmax for multi-class)
+        probs = F.softmax(logits, dim=-1)               # (B, num_classes)
+        topk_vals, topk_idx = probs.topk(K, dim=-1)     # (B, K)
+
+        q_emb = joint_emb.detach().cpu().numpy()          # (B, D)
+        retr_ids, retr_dists = self.retriever.retrieve(q_emb, K=K)
+
+        # ---- Assemble output ----
+        output = {
+            'probs':            probs.detach().cpu().numpy(),
+            'topk_idx':         topk_idx.detach().cpu().tolist(),
+            'topk_vals':        topk_vals.detach().cpu().tolist(),
+            'retrieval_ids':    retr_ids,
+            'retrieval_dists':  retr_dists
+        }
+
+        if explain:
+            expl = self.explain(
+                image, input_ids, attention_mask,
+                joint_emb, attn_weights,
+                targets=topk_idx[0].tolist(),
+                K=K
+            )
+            output.update(expl)
+
+        return output
+
+    def explain(
+        self,
+        image: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        joint_emb: torch.Tensor,
+        attn_weights: dict,
+        targets: list,
+        K: int = 5
+    ) -> dict:
+        # Case-based retrieval again as part of explanation
+        q_emb = joint_emb.detach().cpu().numpy()
+        retr_ids, retr_dists = self.retriever.retrieve(q_emb, K=K)
+
+        # Lazy-init explainer
+        if self.explainer is None:
+            self.explainer = ExplanationEngine(
+                fusion_model=self.fusion,
+                classifier_head=self.classifier,
+                image_size=self.image_size,
+                ig_steps=self.ig_steps
+            )
+
+        # Extract features for heatmap methods
+        (img_global, img_patches), txt_feats = self.backbones(
+            image.to(self.device),
+            input_ids.to(self.device),
+            attention_mask.to(self.device)
+        )
+
+        # Compute attention + IG maps
+        maps = self.explainer.explain(
+            img_global=img_global,
+            img_patches=img_patches,
+            txt_feats=txt_feats,
+            attn_weights=attn_weights,
+            targets=targets
+        )
+
+        return {
+            'retrieval_ids':   retr_ids,
+            'retrieval_dists': retr_dists,
+            'attention_map':   maps['attention_map'],
+            'ig_maps':         maps['ig_map']
+        }

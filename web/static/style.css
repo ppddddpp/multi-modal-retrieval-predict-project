@@ -1,0 +1,37 @@
+body {
+  font-family: Arial, sans-serif;
+  margin: 2rem;
+}
+
+h1, h2 {
+  color: #333;
+}
+
+.form {
+  margin-bottom: 2rem;
+}
+
+.form div {
+  margin: 0.5rem 0;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  font-size: 1rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.grid div {
+  text-align: center;
+}
+
+.grid img {
+  width: 100%;
+  border: 1px solid #ccc;
+}

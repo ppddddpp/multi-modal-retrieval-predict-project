@@ -1,0 +1,15 @@
+epochs:    50
+patience:  10
+batch_size: 1
+lr:        2e-5
+use_focal: false
+use_hybrid: true
+fusion_type: "cross"
+joint_dim: 1024
+gamma_focal: 1
+focal_ratio: 0.3
+temperature: 0.125
+cls_weight: 1.5
+cont_weight: 0.3
+num_heads: 32
+project_name: "multimodal-disease-classification-2207"

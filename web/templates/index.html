@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Multimodal Retrieval & Explanation</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+    <h1>Medical Image Retrieval & Explanation</h1>
+
+    <form method="post" enctype="multipart/form-data" class="form">
+        <div>
+            <label>Upload DICOM:</label>
+            <input type="file" name="dicom_file" accept=".dcm" required>
+        </div>
+        <div>
+            <label>Text Query:</label>
+            <input type="text" name="text_query" value="lung nodule" required>
+        </div>
+        <button type="submit">Search & Explain</button>
+    </form>
+
+    {% if results %}
+    <section>
+        <h2>Top‑5 Retrieval Results</h2>
+        <ol>
+            {% for img_id, dist in results %}
+            <li>{{ img_id }} &mdash; dist {{ "%.2f"|format(dist) }}</li>
+            {% endfor %}
+        </ol>
+    </section>
+
+    <section>
+        <h2>Visualizations</h2>
+        <div class="grid">
+            <div>
+                <h3>Original</h3>
+                <img src="data:image/png;base64,{{ img_orig }}">
+            </div>
+            <div>
+                <h3>Attention Map</h3>
+                <img src="data:image/png;base64,{{ attn_map }}">
+            </div>
+            <div>
+                <h3>Integrated Gradients</h3>
+                <img src="data:image/png;base64,{{ ig_map }}">
+            </div>
+            <div>
+                <h3>Hybrid Overlay</h3>
+                <img src="data:image/png;base64,{{ hybrid_map }}">
+            </div>
+        </div>
+    </section>
+    {% endif %}
+</body>
+
+</html>
