@@ -28,7 +28,8 @@ class MultiModalRetrievalModel(nn.Module):
         bert_local_dir:   str = None,
         pretrained:   bool = True,
         checkpoint_path:str = None,
-        device:         torch.device = torch.device("cpu")
+        device:         torch.device = torch.device("cpu"),
+        training:      bool = False
     ):
         """
         :param joint_dim: dimensionality of the joint embedding
@@ -42,6 +43,7 @@ class MultiModalRetrievalModel(nn.Module):
         :param pretrained: whether to load pre-trained weights for the Swin and ClinicalBERT models
         :param checkpoint_path: path to a model checkpoint to load
         :param device: device to run the model on
+        :param training: whether the model is being trained or used for inference
 
         Args:
             joint_dim (int, optional): dimensionality of the joint embedding. Defaults to 256.
@@ -55,6 +57,7 @@ class MultiModalRetrievalModel(nn.Module):
             pretrained (bool, optional): whether to load pre-trained weights for the Swin and ClinicalBERT models. Defaults to True.
             checkpoint_path (str, optional): path to a model checkpoint to load. Defaults to None.
             device (torch.device, optional): device to run the model on. Defaults to torch.device("cpu").
+            training (bool, optional): whether the model is being trained or used for inference. Defaults to False.
         """
         super().__init__()
         self.device = device
@@ -87,8 +90,14 @@ class MultiModalRetrievalModel(nn.Module):
         #  Retrieval engine (offline index of embeddings)
         features_path = EMBEDDINGS_DIR / "val_joint_embeddings.npy"
         ids_path      = EMBEDDINGS_DIR / "val_ids.json"
-        if not features_path.exists() or not ids_path.exists():
-            raise FileNotFoundError(f"Expected embeddings at {features_path} and IDs at {ids_path}")
+        if not training:
+            if not features_path.exists() or not ids_path.exists():
+                raise FileNotFoundError(f"Expected embeddings at {features_path} and IDs at {ids_path}")
+        else:
+            # during training, we can use a dummy path
+            features_path = EMBEDDINGS_DIR / "dummy_embeddings.npy"
+            ids_path      = EMBEDDINGS_DIR / "dummy_ids.json"
+            
         self.retriever = RetrievalEngine(
             features_path=str(features_path),
             ids_path=str(ids_path)

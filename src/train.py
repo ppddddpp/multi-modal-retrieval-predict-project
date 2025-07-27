@@ -263,7 +263,8 @@ if __name__ == '__main__':
         fusion_type=FUSION_TYPE,
         swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
-        device=device
+        device=device,
+        training=True
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
