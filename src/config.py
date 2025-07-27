@@ -22,6 +22,7 @@ class Config:
     run_name: str = field(init=False)
 
     def __post_init__(self):
+        name_method = ""
         if self.use_hybrid:
             name_method = "hybrid_bce_focal"
         elif self.use_focal:
@@ -57,4 +58,21 @@ class Config:
         """
         with open(path) as f:
             data = yaml.safe_load(f)
+            
+        data["epochs"] = int(data.get("epochs", 50))
+        data["patience"] = int(data.get("patience", 10))
+        data["batch_size"] = int(data.get("batch_size", 1))
+        data["lr"] = float(data.get("lr", 2e-5))
+        data["gamma_focal"] = float(data.get("gamma_focal", 1.0))
+        data["focal_ratio"] = float(data.get("focal_ratio", 0.3))
+        data["temperature"] = float(data.get("temperature", 0.125))
+        data["cls_weight"] = float(data.get("cls_weight", 1.5))
+        data["cont_weight"] = float(data.get("cont_weight", 0.3))
+        data["num_heads"] = int(data.get("num_heads", 32))
+        data["use_focal"] = bool(data.get("use_focal", False))
+        data["use_hybrid"] = bool(data.get("use_hybrid", True))
+        data["fusion_type"] = str(data.get("fusion_type", "cross"))
+        data["joint_dim"] = int(data.get("joint_dim", 1024))
+        data["project_name"] = str(data.get("project_name", "multi-modal-retrieval-predict"))
+
         return Config(**data)
