@@ -1,4 +1,3 @@
-import faiss
 import numpy as np
 import json
 from typing import Tuple, List, Literal
@@ -8,7 +7,7 @@ class RetrievalEngine:
         self,
         features_path: str,
         ids_path: str,
-        method: Literal["faiss", "dls"] = "faiss",
+        method: Literal["dls"] = "faiss",
         dls_link_thresh: float = 0.5,
         dls_max_links: int = 10
     ):
@@ -30,21 +29,12 @@ class RetrievalEngine:
         with open(self.ids_path, "r") as f:
             self.ids = json.load(f)
 
-        if self.method == "faiss":
-            self.index = self._build_faiss_index()
-        elif self.method == "dls":
+        if self.method == "dls":
             self.dls_links = self._build_dls_links(
                 threshold=dls_link_thresh, max_links=dls_max_links
             )
         else:
             raise ValueError(f"Unknown retrieval method: {self.method}")
-
-    def _build_faiss_index(self):
-        """Build FAISS L2 index."""
-        dim = self.embs.shape[1]
-        index = faiss.IndexFlatL2(dim)
-        index.add(self.embs)
-        return index
 
     def _build_dls_links(self, threshold: float, max_links: int):
         """Construct a simple DenseLinkSearch neighbor graph using cosine similarity."""
@@ -75,11 +65,7 @@ class RetrievalEngine:
             List of sample IDs, List of distances/similarities
         """
         query_emb = query_emb.astype("float32")
-        if self.method == "faiss":
-            dists, idxs = self.index.search(query_emb, K)
-            idxs = idxs[0].tolist()
-            dists = dists[0].tolist()
-        elif self.method == "dls":
+        if self.method == "dls":
             # Flatten brute force for demo
             query = query_emb[0]
             sims = self.embs @ query / (
