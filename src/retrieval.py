@@ -17,7 +17,7 @@ class RetrievalEngine:
         Parameters:
         - features_path: path to .npy file of database embeddings
         - ids_path: path to .json file of corresponding sample IDs
-        - method: one of "faiss" or "dls"
+        - method: retrieval method; one of "dls"
         - dls_link_thresh: cosine similarity threshold for DenseLinkSearch
         - dls_max_links: max number of linked neighbors to expand
         """
