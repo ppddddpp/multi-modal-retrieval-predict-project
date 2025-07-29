@@ -176,9 +176,11 @@ You can visualize:
 * Text-to-image attention heatmaps
 * IG-based disease explanations
 
-[Predict & explain](demo/1.png)
-[Retrieval Demo](demo/2.png)
+### Predict & Explain
+![Predict & Explain](demo/1.png)
 
+### Retrieval Demo
+![Retrieval Demo](demo/2.png)
 ---
 
 ## Acknowledgments
