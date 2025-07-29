@@ -176,13 +176,8 @@ You can visualize:
 * Text-to-image attention heatmaps
 * IG-based disease explanations
 
-(Coming soon: screenshots or demo GIFs)
-
----
-
-## License
-
-MIT License or specify yours here.
+[Predict & explain](demo/1.png)
+[Retrieval Demo](demo/2.png)
 
 ---
 
