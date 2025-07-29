@@ -446,6 +446,7 @@ if __name__ == '__main__':
     # Load best model and save train embeddings
     model.load_state_dict(torch.load(CHECKPOINT_DIR / "model_best.pt"))
     model.eval()
+    
     y_true, y_pred, train_embs, train_ids, train_attns = evaluate(model, train_loader)
     np.save(EMBED_SAVE_PATH / "train_joint_embeddings.npy", train_embs)
     torch.save(train_attns, ATTN_DIR / "train_attn_weights.npy")

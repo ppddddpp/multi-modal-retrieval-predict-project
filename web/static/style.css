@@ -1,37 +1,31 @@
+/* Dark-mode base */
 body {
-  font-family: Arial, sans-serif;
-  margin: 2rem;
+  background-color: #121212;
+  color: #e0e0e0;
 }
 
-h1, h2 {
-  color: #333;
+/* Cards */
+.card {
+  background-color: #1e1e1e;
+  border: none;
 }
 
-.form {
-  margin-bottom: 2rem;
+/* Accordion buttons */
+.accordion-button {
+  background-color: #1e1e1e;
+  color: #e0e0e0;
+}
+.accordion-button:not(.collapsed) {
+  background-color: #292929;
 }
 
-.form div {
-  margin: 0.5rem 0;
+/* Form labels */
+.form-label,
+.form-check-label {
+  color: #e0e0e0;
 }
 
-button {
-  padding: 0.5rem 1rem;
-  font-size: 1rem;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1rem;
-  margin-top: 1rem;
-}
-
-.grid div {
-  text-align: center;
-}
-
-.grid img {
-  width: 100%;
-  border: 1px solid #ccc;
+/* Optional: lighten hr dividers inside accordion bodies */
+.accordion-body hr {
+  border-color: #444;
 }

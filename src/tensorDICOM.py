@@ -1,8 +1,9 @@
-import os
+import io
 import torch
 import pydicom
 import numpy as np
 from torchvision import transforms
+from pathlib import Path
 
 class DICOMImagePreprocessor:
     """
@@ -64,7 +65,12 @@ class DICOMImagePreprocessor:
         array (np.ndarray): A normalized array of shape (H, W) ready for
             input to a neural network.
         """
-        dcm = pydicom.dcmread(dicom_path)
+        if isinstance(dicom_path, (str, Path)):
+            dcm = pydicom.dcmread(dicom_path)
+        elif isinstance(dicom_path, (bytes, bytearray)):
+            dcm = pydicom.dcmread(io.BytesIO(dicom_path))
+        else:
+            raise TypeError(f"Unsupported type for dicom_path: {type(dicom_path)}")
 
         # Raw pixel values
         raw = dcm.pixel_array.astype(np.float32)
@@ -106,7 +112,10 @@ class DICOMImagePreprocessor:
         tensor (torch.Tensor): A normalized tensor of shape (1, H, W) ready for
             input to a neural network.
         """
-        dcm = pydicom.dcmread(dicom_path)
+        if isinstance(dicom_path, (bytes, bytearray)):
+            dcm = pydicom.dcmread(io.BytesIO(dicom_path))
+        else:
+            dcm = pydicom.dcmread(dicom_path)
         # Read window values (handle MultiValue)
         if 'WindowCenter' in dcm:
             wc = float(dcm.WindowCenter[0] if isinstance(dcm.WindowCenter, pydicom.multival.MultiValue) else dcm.WindowCenter)

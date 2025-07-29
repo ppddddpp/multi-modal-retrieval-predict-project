@@ -183,6 +183,6 @@ class CrossModalFusion(nn.Module):
 
         if return_attention:
             return fused, {'txt2img': attn_weights_txt2img, 'img2txt': attn_weights_img2txt}
-        return fused
+        return fused, None
 
 

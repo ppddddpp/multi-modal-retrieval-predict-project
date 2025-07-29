@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from fusion import CrossModalFusion, Backbones
-from retrieval import RetrievalEngine
+from retrieval import RetrievalEngine, make_retrieval_engine
 from pathlib import Path
 from explain import ExplanationEngine
 import os
@@ -103,9 +103,12 @@ class MultiModalRetrievalModel(nn.Module):
                 self.to(device)
                 self.eval()
 
-            self.retriever = RetrievalEngine(
+            self.retriever = make_retrieval_engine(
                 features_path=str(features_path),
-                ids_path=str(ids_path)
+                ids_path=str(ids_path),
+                method="dls",
+                link_threshold=0.5,
+                max_links=10
             )
 
             # set up explanation 
@@ -212,7 +215,8 @@ class MultiModalRetrievalModel(nn.Module):
                 fusion_model=self.fusion,
                 classifier_head=self.classifier,
                 image_size=self.image_size,
-                ig_steps=self.ig_steps
+                ig_steps=self.ig_steps,
+                device=self.device
             )
 
         # Extract features for heatmap methods
@@ -235,5 +239,5 @@ class MultiModalRetrievalModel(nn.Module):
             'retrieval_ids':   retr_ids,
             'retrieval_dists': retr_dists,
             'attention_map':   maps['attention_map'],
-            'ig_maps':         maps['ig_map']
+            'ig_maps':         maps['ig_maps']
         }

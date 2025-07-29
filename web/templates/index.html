@@ -2,58 +2,146 @@
 <html lang="en">
 
 <head>
-    <meta charset="UTF-8">
-    <title>Multimodal Retrieval & Explanation</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <meta charset="UTF-8" />
+    <title>Medical Image Retrieval & Explanation</title>
+
+    <!-- Bootstrap 5 CSS (CDN) -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+
+    <!-- Your custom overrides -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
 
-<body>
-    <h1>Medical Image Retrieval & Explanation</h1>
+<body class="d-flex flex-column min-vh-100">
 
-    <form method="post" enctype="multipart/form-data" class="form">
-        <div>
-            <label>Upload DICOM:</label>
-            <input type="file" name="dicom_file" accept=".dcm" required>
+    <!-- Navbar -->
+    <nav class="navbar navbar-dark bg-dark mb-4">
+        <div class="container">
+            <span class="navbar-brand mb-0 h1">Medical Image Predict & Explain</span>
         </div>
-        <div>
-            <label>Text Query:</label>
-            <input type="text" name="text_query" value="lung nodule" required>
-        </div>
-        <button type="submit">Search & Explain</button>
-    </form>
+    </nav>
 
-    {% if results %}
-    <section>
-        <h2>Top‑5 Retrieval Results</h2>
-        <ol>
-            {% for img_id, dist in results %}
-            <li>{{ img_id }} &mdash; dist {{ "%.2f"|format(dist) }}</li>
-            {% endfor %}
-        </ol>
-    </section>
+    <!-- Main container -->
+    <div class="container flex-grow-1">
 
-    <section>
-        <h2>Visualizations</h2>
-        <div class="grid">
-            <div>
-                <h3>Original</h3>
-                <img src="data:image/png;base64,{{ img_orig }}">
-            </div>
-            <div>
-                <h3>Attention Map</h3>
-                <img src="data:image/png;base64,{{ attn_map }}">
-            </div>
-            <div>
-                <h3>Integrated Gradients</h3>
-                <img src="data:image/png;base64,{{ ig_map }}">
-            </div>
-            <div>
-                <h3>Hybrid Overlay</h3>
-                <img src="data:image/png;base64,{{ hybrid_map }}">
+        <!-- Upload & Query Form -->
+        <div class="card mb-4 p-4">
+            <h2 class="card-title mb-3">Search & Explain</h2>
+            <form method="post" enctype="multipart/form-data" class="row g-3">
+                <div class="col-md-6">
+                    <label for="dicom_file" class="form-label">Upload DICOM</label>
+                    <input type="file" class="form-control" id="dicom_file" name="dicom_file" accept=".dcm" required />
+                </div>
+                <div class="col-md-6">
+                    <label for="text_query" class="form-label">Report Text</label>
+                    <input type="text" class="form-control" id="text_query" name="text_query"
+                        value="(Put your report about the DICOM here)" required />
+                </div>
+                <div class="col-12 form-check">
+                    <input class="form-check-input" type="checkbox" id="show_image" name="show_image" checked />
+                    <label class="form-check-label" for="show_image">
+                        Show original DICOM image
+                    </label>
+                </div>
+                <div class="col-12 form-check">
+                    <input class="form-check-input" type="checkbox" id="show_retrieval_detail"
+                        name="show_retrieval_detail" />
+                    <label class="form-check-label" for="show_retrieval_detail">
+                        Show retrieval reports & labels
+                    </label>
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-primary">
+                        Search & Explain
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Predicted Labels -->
+        {% if topk_labels %}
+        <div class="card mb-4 p-4">
+            <h2 class="card-title mb-3">Predicted Labels</h2>
+            <ul class="list-group list-group-flush">
+                {% for lbl in topk_labels %}
+                <li class="list-group-item bg-transparent text-light">{{ lbl }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- Visualizations -->
+        {% if img_orig or attn_map or ig_map or hybrid_map %}
+        <div class="card mb-4 p-4">
+            <h2 class="card-title mb-3">Visualizations</h2>
+            <div class="row g-3">
+                {% if show_image and img_orig %}
+                <div class="col-md-6 col-lg-3 text-center">
+                    <h5>Original</h5>
+                    <img src="data:image/png;base64,{{ img_orig }}" class="img-fluid rounded shadow-sm" />
+                </div>
+                {% endif %}
+                {% if attn_map %}
+                <div class="col-md-6 col-lg-3 text-center">
+                    <h5>Attention Map</h5>
+                    <img src="data:image/png;base64,{{ attn_map }}" class="img-fluid rounded shadow-sm" />
+                </div>
+                {% endif %}
+                {% if ig_map %}
+                <div class="col-md-6 col-lg-3 text-center">
+                    <h5>Integrated Gradients</h5>
+                    <img src="data:image/png;base64,{{ ig_map }}" class="img-fluid rounded shadow-sm" />
+                </div>
+                {% endif %}
+                {% if hybrid_map %}
+                <div class="col-md-6 col-lg-3 text-center">
+                    <h5>Hybrid Overlay</h5>
+                    <img src="data:image/png;base64,{{ hybrid_map }}" class="img-fluid rounded shadow-sm" />
+                </div>
+                {% endif %}
             </div>
         </div>
-    </section>
-    {% endif %}
+        {% endif %}
+
+        <!-- Retrieved Image Details Accordion -->
+        {% if retrieval_detailed %}
+        <div class="card mb-4 p-4">
+            <h2 class="card-title mb-3">Retrieved Image Details</h2>
+            <div class="accordion" id="retrievalAccordion">
+                {% for item in retrieval_detailed %}
+                <div class="accordion-item mb-2">
+                    <h2 class="accordion-header" id="heading{{ loop.index }}">
+                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                            data-bs-target="#collapse{{ loop.index }}">
+                            {{ item.id }} — dist {{ "%.2f"|format(item.dist) }}
+                        </button>
+                    </h2>
+                    <div id="collapse{{ loop.index }}" class="accordion-collapse collapse"
+                        data-bs-parent="#retrievalAccordion">
+                        <div class="accordion-body">
+                            {% if item.image %}
+                            <img src="data:image/png;base64,{{ item.image }}" class="img-fluid mb-3" alt="Retrieved" />
+                            {% endif %}
+                            <p><strong>Labels:</strong></p>
+                            <ul>
+                                {% for label in item.labels %}
+                                <li>{{ label }}</li>
+                                {% endfor %}
+                            </ul>
+                            <p><strong>Report:</strong></p>
+                            <pre>{{ item.report }}</pre>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+    </div>
+
+    <!-- Bootstrap JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 
 </html>

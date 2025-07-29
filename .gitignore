@@ -206,3 +206,6 @@ embeddings
 checkpoints
 attention_maps
 eval_csvs
+featureDBs
+ground_truths
+web_test_set
