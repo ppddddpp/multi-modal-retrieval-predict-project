@@ -209,3 +209,4 @@ eval_csvs
 featureDBs
 ground_truths
 web_test_set
+retrieval_eval_result

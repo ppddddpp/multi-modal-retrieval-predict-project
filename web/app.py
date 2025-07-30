@@ -19,6 +19,7 @@ from tensorDICOM import DICOMImagePreprocessor
 from model import MultiModalRetrievalModel
 from labeledData import disease_groups, normal_groups
 from dataParser import parse_openi_xml
+from retrieval import make_retrieval_engine
 plt.ioff()
 
 # ── Project directories ────────────────────────────────────────────────────────
@@ -79,6 +80,14 @@ def find_dicom_file(rid: str) -> Path:
 
 report_lookup = load_report_lookup_via_parser(XML_DIR, DICOM_ROOT)
 
+retriever = make_retrieval_engine(
+    features_path=str(EMBEDDINGS_DIR / "trainval_joint_embeddings.npy"),
+    ids_path=str(EMBEDDINGS_DIR / "trainval_ids.json"),
+    method="dls",
+    link_threshold=0.5,
+    max_links=10
+)
+
 model = MultiModalRetrievalModel(
     joint_dim=cfg.joint_dim,
     num_heads=cfg.num_heads,
@@ -87,12 +96,9 @@ model = MultiModalRetrievalModel(
     swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
     bert_local_dir= MODEL_DIR / "clinicalbert_local",
     checkpoint_path=str(CKPT_PATH),
-    device=device
+    device=device,
+    retriever=retriever
 ).to(device)
-model.eval()
-
-state = torch.load(CKPT_DIR / "model_best.pt", map_location=device)
-model.load_state_dict(state)
 model.eval()
 
 preproc   = DICOMImagePreprocessor()
@@ -117,7 +123,6 @@ def np_to_base64_img(arr: np.ndarray, cmap="gray") -> str:
     plt.close(fig)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("ascii")
-
 
 @app.route("/", methods=["GET", "POST"])
 def index():

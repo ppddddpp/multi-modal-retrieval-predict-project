@@ -3,11 +3,13 @@ import numpy as np
 import torch
 from pathlib import Path
 import pandas as pd
+import time
+from typing import List
 from config import Config
 from model import MultiModalRetrievalModel
 from retrieval import make_retrieval_engine
 from dataParser import parse_openi_xml
-from retrieval_metrics import precision_at_k, recall_at_k
+from retrieval_metrics import precision_at_k, mean_average_precision, mean_reciprocal_rank
 from dataLoader import build_dataloader
 from labeledData import disease_groups, normal_groups
 
@@ -96,6 +98,8 @@ def main(k=10):
 
     all_ret_gen,  all_rel_gen  = [], []
     all_ret_hist, all_rel_hist = [], []
+    gen_times: List[float]  = []
+    hist_times: List[float] = []
 
     for batch in test_loader:
         qid = batch["id"][0]
@@ -105,29 +109,58 @@ def main(k=10):
         mask  = batch["attn_mask"].to(device)
 
         with torch.no_grad():
-            joint_emb, _, _ = model(img, ids, mask, return_attention=False)
+            outputs = model(img, ids, mask, return_attention=False)
+            if isinstance(outputs, tuple) or isinstance(outputs, list):
+                joint_emb = outputs[0]
+            else:
+                joint_emb = outputs
 
         q_emb = joint_emb.cpu().numpy()
 
         # Generalization: test to test
+        t0 = time.perf_counter()
         ret_ids, _ = engine_testdb.retrieve(q_emb, K=5)
+        gen_times.append(time.perf_counter() - t0)
         all_ret_gen.append(ret_ids)
         all_rel_gen.append(gt_general[qid])
 
         # Historical: test to train
+        t0 = time.perf_counter()
         ret_ids, _ = engine_traindb.retrieve(q_emb, K=5)
+        hist_times.append(time.perf_counter() - t0)
         all_ret_hist.append(ret_ids)
         all_rel_hist.append(gt_historical[qid])
 
-    # Evaluate at K = 5
-    p5_gen   = np.mean([precision_at_k(r, rel, k=k) for r, rel in zip(all_ret_gen, all_rel_gen)])
-    r5_gen   = np.mean([recall_at_k(r, rel, k=k) for r, rel in zip(all_ret_gen, all_rel_gen)])
+    # Evaluate precision at k
+    p_gen   = np.mean([precision_at_k(r, rel, k=k) for r, rel in zip(all_ret_gen, all_rel_gen)])
+    p_hist  = np.mean([precision_at_k(r, rel, k=k) for r, rel in zip(all_ret_hist, all_rel_hist)])
 
-    p5_hist  = np.mean([precision_at_k(r, rel, k=k) for r, rel in zip(all_ret_hist, all_rel_hist)])
-    r5_hist  = np.mean([recall_at_k(r, rel, k=k) for r, rel in zip(all_ret_hist, all_rel_hist)])
+    map_gen  = mean_average_precision(all_ret_gen, all_rel_gen, k=k)
+    map_hist = mean_average_precision(all_ret_hist, all_rel_hist, k=k)
 
-    print(f"Generalization (test to test)   P@{k}: {p5_gen:.4f},  R@{k}: {r5_gen:.4f}")
-    print(f"Historical    (test to train)  P@{k}: {p5_hist:.4f}, R@{k}: {r5_hist:.4f}")
+    mrr_gen  = mean_reciprocal_rank(all_ret_gen, all_rel_gen)
+    mrr_hist = mean_reciprocal_rank(all_ret_hist, all_rel_hist)
+
+    # average query times (ms)
+    avg_gen_ms  = 1000 * np.mean(gen_times)
+    avg_hist_ms = 1000 * np.mean(hist_times)
+
+    print(f"Generalization (test to test)   P@{k}: {p_gen:.4f}   AvgTime: {avg_gen_ms:.2f} ms")
+    print(f"Historical    (test to train)  P@{k}: {p_hist:.4f}   AvgTime: {avg_hist_ms:.2f} ms")
+    print(f"Generalization (test to test)   mAP: {map_gen:.4f}   MRR: {mrr_gen:.4f}")
+    print(f"Historical    (test to train)  mAP: {map_hist:.4f}   MRR: {mrr_hist:.4f}")
+
+    result_dir = BASE_DIR / "retrieval_eval_result"
+    result_dir.mkdir(exist_ok=True)
+
+    result_path = result_dir / f"eval_results_k{k}.txt"
+    with open(result_path, "w") as f:
+        f.write(f"Generalization (test to test)   P@{k}: {p_gen:.4f}   AvgTime: {avg_gen_ms:.2f} ms\n")
+        f.write(f"Historical    (test to train)  P@{k}: {p_hist:.4f}   AvgTime: {avg_hist_ms:.2f} ms\n")
+        f.write(f"Generalization (test to test)   mAP: {map_gen:.4f}   MRR: {mrr_gen:.4f}\n")
+        f.write(f"Historical    (test to train)  mAP: {map_hist:.4f}   MRR: {mrr_hist:.4f}\n")
+    
+    print(f"[INFO] Results saved to: {result_path}")
 
 if __name__ == "__main__":
     main(k=5)

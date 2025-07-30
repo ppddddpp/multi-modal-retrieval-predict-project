@@ -185,6 +185,6 @@ You can visualize:
 
 ## Acknowledgments
 
-* NIH Open-i Dataset
+* [NIH Open-i Dataset](https://openi.nlm.nih.gov/faq#collection)
 * SciSpaCy / ClinicalBERT / Swin Transformer
 * Captum (Facebook AI)

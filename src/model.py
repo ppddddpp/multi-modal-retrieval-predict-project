@@ -32,7 +32,8 @@ class MultiModalRetrievalModel(nn.Module):
         pretrained:   bool = True,
         checkpoint_path:str = None,
         device:         torch.device = torch.device("cpu"),
-        training:      bool = False
+        training:      bool = False,
+        retriever: RetrievalEngine = None
     ):
         """
         :param joint_dim: dimensionality of the joint embedding
@@ -47,6 +48,7 @@ class MultiModalRetrievalModel(nn.Module):
         :param checkpoint_path: path to a model checkpoint to load
         :param device: device to run the model on
         :param training: whether the model is being trained or used for inference
+        :param retriever: optional retrieval engine for case-based retrieval
 
         Args:
             joint_dim (int, optional): dimensionality of the joint embedding. Defaults to 256.
@@ -61,6 +63,7 @@ class MultiModalRetrievalModel(nn.Module):
             checkpoint_path (str, optional): path to a model checkpoint to load. Defaults to None.
             device (torch.device, optional): device to run the model on. Defaults to torch.device("cpu").
             training (bool, optional): whether the model is being trained or used for inference. Defaults to False.
+            retriever (RetrievalEngine, optional): optional retrieval engine for case-based retrieval. Defaults to None.
         """
         super().__init__()
         self.device = device
@@ -78,7 +81,7 @@ class MultiModalRetrievalModel(nn.Module):
 
         # set up fusion
         if fusion_type == "cross":
-            self.fusion = CrossModalFusion(img_dim, txt_dim, joint_dim, num_heads)
+            self.fusion = CrossModalFusion(img_dim, txt_dim, joint_dim, num_heads).to(device)
         else:
             raise ValueError(f"Unknown fusion_type {fusion_type!r}")
 
@@ -91,25 +94,32 @@ class MultiModalRetrievalModel(nn.Module):
         ).to(device)
 
         #  Retrieval engine (offline index of embeddings)
-        features_path = EMBEDDINGS_DIR / "val_joint_embeddings.npy"
-        ids_path      = EMBEDDINGS_DIR / "val_ids.json"
         if not training:
-            if not features_path.exists() or not ids_path.exists():
-                raise FileNotFoundError(f"Expected embeddings at {features_path} and IDs at {ids_path}")
-            
             if checkpoint_path:
                 state = torch.load(checkpoint_path, map_location=device)
                 self.load_state_dict(state)
                 self.to(device)
                 self.eval()
 
-            self.retriever = make_retrieval_engine(
-                features_path=str(features_path),
-                ids_path=str(ids_path),
-                method="dls",
-                link_threshold=0.5,
-                max_links=10
-            )
+            if retriever:
+                self.retriever = retriever
+            else:
+                features_path = EMBEDDINGS_DIR / "val_joint_embeddings.npy"
+                ids_path      = EMBEDDINGS_DIR / "val_ids.json"
+                if not features_path.exists() or not ids_path.exists():
+                    raise FileNotFoundError(
+                        f"Expected embeddings at {features_path} and IDs at {ids_path}"
+                    )
+                import warnings
+                warnings.warn("No retrieval engine provided. Using default DLS with val embeddings.")
+
+                self.retriever = make_retrieval_engine(
+                    features_path=str(features_path),
+                    ids_path=str(ids_path),
+                    method="dls",
+                    link_threshold=0.5,
+                    max_links=10
+                )
 
             # set up explanation 
             self.explainer   = None
@@ -126,6 +136,9 @@ class MultiModalRetrievalModel(nn.Module):
                     json.dump(["dummy_id"], f)
             
             self.retriever = None
+
+    def set_retriever(self, retriever: RetrievalEngine):
+        self.retriever = retriever
 
     def forward(self, image, input_ids, attention_mask, return_attention=False):
         """
@@ -144,15 +157,13 @@ class MultiModalRetrievalModel(nn.Module):
             attention_mask.to(self.device)
         )
 
-        # fuse into shared embedding
-        if return_attention:
-            joint_emb, attn_weights = self.fusion(
-                img_global, img_patches, txt_feats, return_attention=True
-            )
-        else:
-            joint_emb    = self.fusion(img_global, img_patches, txt_feats)
-            attn_weights = None
-
+        # fuse into shared embedding space
+        joint_emb, attn_weights = self.fusion(
+            img_global,
+            img_patches,
+            txt_feats,
+            return_attention=return_attention
+        )
         logits = self.classifier(joint_emb)
         return joint_emb, logits, attn_weights
 
