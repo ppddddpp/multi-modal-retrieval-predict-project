@@ -177,7 +177,6 @@ class DLSRetrievalEngine(RetrievalEngine):
         scores= [ sim      for sim, _ in topk ]
         return ids, scores
 
-
 def make_retrieval_engine(
     features_path: str,
     ids_path: str,

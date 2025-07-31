@@ -162,6 +162,13 @@ def index():
         context["topk_labels"] = [label_cols[i] for i in context["topk_idx"]]
         context["threshold"] = threshold
 
+        topk_labeled_probabilities = []
+        for i in range(len(context["topk_idx"])):
+            label = context["topk_labels"][i]
+            prob = context["topk_vals"][i]
+            topk_labeled_probabilities.append({'label': label, 'prob': prob})
+        context["topk_labels_with_probs"] = topk_labeled_probabilities
+
         # Retrieval
         context["retrieval"] = list(zip(out["retrieval_ids"], out["retrieval_dists"]))
         if context["show_retrieval_detail"]:

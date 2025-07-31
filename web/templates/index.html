@@ -90,12 +90,14 @@
         </div>
         {% endif %}
 
-        {% if topk_labels %}
+        {% if topk_labels_with_probs %}
         <div class="card mb-4 p-4">
-            <h2 class="card-title mb-3">Predicted Labels</h2>
+            <h2 class="card-title mb-3">Top {{ topk_labels_with_probs|length }} Predicted Labels with Probabilities</h2>
             <ul class="list-group list-group-flush">
-                {% for lbl in topk_labels %}
-                <li class="list-group-item bg-transparent text-light">{{ lbl }}</li>
+                {% for item in topk_labels_with_probs %}
+                <li class="list-group-item bg-transparent text-light">
+                    {{ item.label }}: {{ "%.4f"|format(item.prob) }}
+                </li>
                 {% endfor %}
             </ul>
         </div>
