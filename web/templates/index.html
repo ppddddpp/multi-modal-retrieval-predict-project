@@ -50,15 +50,46 @@
                         Show retrieval reports & labels
                     </label>
                 </div>
+                <div class="col-md-6">
+                    <label for="threshold" class="form-label">Prediction Threshold</label>
+                    <input type="range" class="form-range" id="threshold" name="threshold" min="0.1" max="0.9"
+                        value="0.5" step="0.05"
+                        oninput="document.getElementById('threshold_val').textContent = this.value">
+                    <div>Current: <span id="threshold_val">0.5</span></div>
+                    <div class="form-text text-muted">
+                        <strong>Lower threshold</strong> → more sensitive (detects more positives, but increases false
+                        positives).<br>
+                        <strong>Higher threshold</strong> → more specific (fewer false positives, but may miss subtle
+                        findings).
+                    </div>
+                </div>
                 <div class="col-12">
                     <button type="submit" class="btn btn-primary">
-                        Search & Explain
+                        Predict & Explain
                     </button>
                 </div>
+
             </form>
         </div>
 
+        {% if threshold %}
+        <div class="mb-3">
+            <p><strong>Threshold used:</strong> {{ "%.2f"|format(threshold) }}</p>
+        </div>
+        {% endif %}
+
         <!-- Predicted Labels -->
+        {% if pred_labels %}
+        <div class="card mb-4 p-4">
+            <h2 class="card-title mb-3">Threshold-Based Predictions</h2>
+            <ul class="list-group list-group-flush">
+                {% for lbl in pred_labels %}
+                <li class="list-group-item bg-transparent text-success">{{ lbl }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
         {% if topk_labels %}
         <div class="card mb-4 p-4">
             <h2 class="card-title mb-3">Predicted Labels</h2>

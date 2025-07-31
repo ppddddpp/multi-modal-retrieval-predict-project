@@ -171,6 +171,7 @@ class MultiModalRetrievalModel(nn.Module):
                 image: torch.Tensor,
                 input_ids: torch.Tensor,
                 attention_mask: torch.Tensor,
+                threshold=0.5,
                 K: int = 5,
                 explain: bool = False
                 ) -> dict:
@@ -179,20 +180,18 @@ class MultiModalRetrievalModel(nn.Module):
             image, input_ids, attention_mask, return_attention=explain
         )
 
-        # probabilities (softmax for multi-class)
-        probs = F.softmax(logits, dim=-1)               # (B, num_classes)
+        # probabilities 
+        probs = torch.sigmoid(logits)               # (B, num_classes)
+        preds = (probs >= threshold).int()
         topk_vals, topk_idx = probs.topk(K, dim=-1)     # (B, K)
 
         q_emb = joint_emb.detach().cpu().numpy()          # (B, D)
-        retr_ids, retr_dists = self.retriever.retrieve(q_emb, K=K)
-
         # ---- Assemble output ----
         output = {
             'probs':            probs.detach().cpu().numpy(),
+            'preds':            preds.detach().cpu().numpy(),
             'topk_idx':         topk_idx.detach().cpu().tolist(),
             'topk_vals':        topk_vals.detach().cpu().tolist(),
-            'retrieval_ids':    retr_ids,
-            'retrieval_dists':  retr_dists
         }
 
         if explain:

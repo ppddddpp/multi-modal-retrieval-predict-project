@@ -81,8 +81,8 @@ def find_dicom_file(rid: str) -> Path:
 report_lookup = load_report_lookup_via_parser(XML_DIR, DICOM_ROOT)
 
 retriever = make_retrieval_engine(
-    features_path=str(EMBEDDINGS_DIR / "trainval_joint_embeddings.npy"),
-    ids_path=str(EMBEDDINGS_DIR / "trainval_ids.json"),
+    features_path=str(EMBEDDINGS_DIR / "train_joint_embeddings.npy"),
+    ids_path=str(EMBEDDINGS_DIR / "train_ids.json"),
     method="dls",
     link_threshold=0.5,
     max_links=10
@@ -131,7 +131,7 @@ def index():
         # DICOM + text
         dcm_bytes  = request.files["dicom_file"].read()
         img_tensor = preproc(dcm_bytes).unsqueeze(0).to(device)
-
+        threshold = float(request.form.get("threshold", 0.5))
         tokens    = tokenizer(
             request.form["text_query"],
             return_tensors="pt",
@@ -143,7 +143,11 @@ def index():
         txt_mask = tokens.attention_mask.to(device)
 
         # Predict + explain
-        out = model.predict(img_tensor, txt_ids, txt_mask, K=5, explain=True)
+        out = model.predict(img_tensor, txt_ids, txt_mask, threshold=threshold, K=5, explain=True)
+
+        pred_labels = [label_cols[i] for i, v in enumerate(out["preds"][0]) if v == 1]
+        context["pred_labels"] = pred_labels
+
 
         # Show image option and retrieval detail
         show_image = "show_image" in request.form
@@ -152,10 +156,11 @@ def index():
         context["show_retrieval_detail"] = show_detail
 
         # Assemble context
-        # Classification top‐K
+        context["preds"] = out["preds"][0]
         context["topk_idx"]  = out["topk_idx"][0]
         context["topk_vals"] = out["topk_vals"][0]
         context["topk_labels"] = [label_cols[i] for i in context["topk_idx"]]
+        context["threshold"] = threshold
 
         # Retrieval
         context["retrieval"] = list(zip(out["retrieval_ids"], out["retrieval_dists"]))
