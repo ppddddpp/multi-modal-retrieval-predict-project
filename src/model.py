@@ -11,6 +11,45 @@ import json
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 EMBEDDINGS_DIR = BASE_DIR / "embeddings"
+class MultiHeadMLP(nn.Module):
+    def __init__(self, dim, num_heads):
+        super().__init__()
+        assert dim % num_heads == 0
+        self.head_dim = dim // num_heads
+        self.num_heads = num_heads
+        self.linear1 = nn.Linear(dim, dim * 2)
+        self.act = nn.GELU()
+        self.linear2 = nn.Linear(dim * 2, dim)
+
+    def forward(self, x):
+        B, D = x.size()
+        x = self.linear1(x)
+        x = self.act(x)
+        x = self.linear2(x)
+        return x
+
+class StochasticDepth(nn.Module):
+    def __init__(self, drop_prob):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x, residual):
+        if not self.training or self.drop_prob == 0.:
+            return x + residual
+        keep_prob = 1 - self.drop_prob
+        shape = [x.shape[0]] + [1] * (x.ndim - 1)  # (B, 1, 1...)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        binary_mask = torch.floor(random_tensor)
+        return x + residual * binary_mask / keep_prob
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, dim, max_len=500):
+        super().__init__()
+        self.pe = nn.Parameter(torch.zeros(1, max_len, dim))
+        nn.init.normal_(self.pe, std=0.02)
+
+    def forward(self, x):
+        return x + self.pe[:, :x.size(1)]
 
 class MultiModalRetrievalModel(nn.Module):
     """
@@ -24,6 +63,7 @@ class MultiModalRetrievalModel(nn.Module):
         joint_dim:    int = 256,
         num_heads:    int = 4,
         num_classes:  int = 22,
+        num_fusion_layers: int = 3,
         fusion_type:  str = "cross",
         swin_name:    str = "swin_base_patch4_window7_224",
         bert_name:    str = "emilyalsentzer/Bio_ClinicalBERT",
@@ -33,12 +73,15 @@ class MultiModalRetrievalModel(nn.Module):
         checkpoint_path:str = None,
         device:         torch.device = torch.device("cpu"),
         training:      bool = False,
+        use_shared_ffn=True,
         retriever: RetrievalEngine = None
     ):
         """
         :param joint_dim: dimensionality of the joint embedding
         :param num_heads: number of attention heads for CrossModalFusion
         :param num_classes: number of output classes
+        :param num_fusion_layers: number of fusion layers to use
+        :param use_shared_ffn: whether to use a shared FFN across fusion layers
         :param fusion_type: type of fusion module to use; one of "cross", "simple", "gated"
         :param swin_name: name of the Swin transformer model to use
         :param bert_name: name of the ClinicalBERT model to use
@@ -53,7 +96,9 @@ class MultiModalRetrievalModel(nn.Module):
         Args:
             joint_dim (int, optional): dimensionality of the joint embedding. Defaults to 256.
             num_heads (int, optional): number of attention heads for CrossModalFusion. Defaults to 4.
-            num_classes (int, optional): number of output classes. Defaults to 14.
+            num_classes (int, optional): number of output classes. Defaults to 22.
+            use_shared_ffn (bool, optional): whether to use a shared FFN across fusion layers. Defaults to True.
+            num_fusion_layers (int, optional): number of fusion layers to use. Defaults to 3.
             fusion_type (str, optional): type of fusion module to use; one of "cross", "simple", "gated". Defaults to "cross".
             swin_name (str, optional): name of the Swin transformer model to use. Defaults to "swin_base_patch4_window7_224".
             bert_name (str, optional): name of the ClinicalBERT model to use. Defaults to "emilyalsentzer/Bio_ClinicalBERT".
@@ -67,7 +112,7 @@ class MultiModalRetrievalModel(nn.Module):
         """
         super().__init__()
         self.device = device
-
+        self.use_shared_ffn = use_shared_ffn
         # instantiate vision+text backbones
         self.backbones = Backbones(
             swin_model_name    = swin_name,
@@ -81,16 +126,59 @@ class MultiModalRetrievalModel(nn.Module):
 
         # set up fusion
         if fusion_type == "cross":
-            self.fusion = CrossModalFusion(img_dim, txt_dim, joint_dim, num_heads).to(device)
+            self.fusion_layers = nn.ModuleList([
+                CrossModalFusion(img_dim, txt_dim, joint_dim, num_heads).to(device)
+                for _ in range(num_fusion_layers)
+            ])
         else:
             raise ValueError(f"Unknown fusion_type {fusion_type!r}")
+        
+        self.self_attn = nn.MultiheadAttention(embed_dim=joint_dim, num_heads=num_heads, batch_first=True)
+
+        # LayerNorm and FFN for residual connections and normalization
+        self.norm1_layers = nn.ModuleList([
+            nn.LayerNorm(joint_dim, eps=1e-5) for _ in range(num_fusion_layers)
+        ])
+        self.norm2_layers = nn.ModuleList([
+            nn.LayerNorm(joint_dim, eps=1e-5) for _ in range(num_fusion_layers)
+        ])
+
+        self.alpha = nn.Parameter(torch.ones(1)) # learnable scaling factor for residual connections
+        self.dropout = nn.Dropout(0.1)
+        self.pos_encoder = PositionalEncoding(joint_dim)
+
+        # Feed-forward network for each fusion layer
+        if self.use_shared_ffn:
+            self.shared_ffn = MultiHeadMLP(joint_dim, num_heads)
+            self.ffn = None
+        else:
+            self.ffn = nn.ModuleList([
+                MultiHeadMLP(joint_dim, num_heads)
+                for _ in range(num_fusion_layers)
+            ])
+            self.shared_ffn = None
+
+        # Stochastic depth for residual connections
+        self.drop_path_layers = nn.ModuleList([
+            StochasticDepth(0.1) for _ in range(num_fusion_layers)
+        ])
+
+        # adapters for each fusion layer
+        self.adapters = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(joint_dim, joint_dim // 2),
+                nn.GELU(),
+                nn.Linear(joint_dim // 2, joint_dim)
+            ) for _ in range(num_fusion_layers)
+        ])
 
         # classification head on the joint embedding
         self.classifier = nn.Sequential(
-            nn.Linear(joint_dim, joint_dim//2),
-            nn.ReLU(inplace=True),
+            nn.Linear(joint_dim, joint_dim * 4),
+            nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(joint_dim//2, num_classes)
+            nn.Linear(joint_dim * 4, num_classes),
+            nn.Dropout(0.1)
         ).to(device)
 
         #  Retrieval engine (offline index of embeddings)
@@ -157,15 +245,48 @@ class MultiModalRetrievalModel(nn.Module):
             attention_mask.to(self.device)
         )
 
-        # fuse into shared embedding space
-        joint_emb, attn_weights = self.fusion(
-            img_global,
-            img_patches,
-            txt_feats,
-            return_attention=return_attention
-        )
+        attn_weights = {}
+        joint_emb = None
+
+        for i, fusion in enumerate(self.fusion_layers):
+            fused, attn = fusion(
+                img_global,
+                img_patches,
+                txt_feats,
+                return_attention=return_attention
+            )
+            fused = self.dropout(fused)
+            fused = fused.unsqueeze(1)
+            fused = self.pos_encoder(fused)  # Add positional encoding
+            fused, _ = self.self_attn(fused, fused, fused)
+            fused = fused.squeeze(1)
+
+            # First layer does not have residual connection
+            if i == 0:
+                x = fused
+            else:
+                x = self.norm1_layers[i](joint_emb)
+                x = self.drop_path_layers[i](x, self.alpha * fused)
+
+            # FFN + Adapter
+            x_ffn = self.norm2_layers[i](x)
+            if self.use_shared_ffn:
+                x = x + self.shared_ffn(x_ffn)
+            else:
+                x = x + self.ffn[i](x_ffn)
+            x = x + self.adapters[i](x)
+
+            # Update joint_emb
+            joint_emb = x
+
+            # Collect per-layer attention maps
+            if return_attention and attn is not None:
+                attn_weights[f"layer_{i}_txt2img"] = attn["txt2img"]
+                attn_weights[f"layer_{i}_img2txt"] = attn["img2txt"]
+    
         logits = self.classifier(joint_emb)
-        return joint_emb, logits, attn_weights
+
+        return joint_emb, logits, attn_weights if return_attention else None
 
     def predict(self,
                 image: torch.Tensor,
@@ -186,6 +307,7 @@ class MultiModalRetrievalModel(nn.Module):
         topk_vals, topk_idx = probs.topk(K, dim=-1)     # (B, K)
 
         q_emb = joint_emb.detach().cpu().numpy()          # (B, D)
+
         # ---- Assemble output ----
         output = {
             'probs':            probs.detach().cpu().numpy(),

@@ -14,6 +14,23 @@ except NameError:
 MODEL_PLACE = BASE_DIR / 'models'
 os.environ['TRANSFORMERS_CACHE'] = str(MODEL_PLACE)
 
+class PreFusionEnhancer(nn.Module):
+    def __init__(self, dim, num_heads=4, dropout=0.1, max_len=512):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True, dropout=0.1)
+        self.norm1 = nn.LayerNorm(dim)
+        self.dropout = nn.Dropout(dropout)
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_len, dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        self.alpha = nn.Parameter(torch.ones(1))
+
+    def forward(self, x):  # x: (B, L, D)
+        B, L, D = x.shape
+        x = x + self.pos_embed[:, :L]  # Add trainable positional embedding
+        x2, _ = self.self_attn(x, x, x)
+        x = self.norm1(self.alpha * x + self.dropout(x2))
+        return x
+
 class Backbones(nn.Module):
     """
     Image and text backbones: Swin Transformer and ClinicalBERT.
@@ -23,7 +40,8 @@ class Backbones(nn.Module):
             self, swin_model_name='swin_base_patch4_window7_224', bert_model_name='emilyalsentzer/Bio_ClinicalBERT',
             swin_checkpoint_path=None,
             bert_local_dir=None,
-            pretrained=True
+            pretrained=True,
+            joint_dim=1024
             ):
         """
         Constructor for Backbones.
@@ -39,6 +57,8 @@ class Backbones(nn.Module):
                 If None, downloads from HuggingFace.
             pretrained (bool): Whether to load the pre-trained weights.
                 Defaults to True.
+            joint_dim (int): The dimension of the joint embedding. 
+            Defaults to 1024.
         """
         super().__init__()
         # instantiate with random weights
@@ -76,6 +96,8 @@ class Backbones(nn.Module):
                 checkpoint_path=str(MODEL_PLACE)
             )
 
+        self.ln_txt2img = nn.LayerNorm(joint_dim)
+        self.ln_img2txt = nn.LayerNorm(joint_dim)
         self.swin_features = nn.Sequential(*list(self.swin.children())[:-1])
         self.img_dim       = self.swin.num_features
         # load ClinicalBERT & record txt_dim
@@ -93,7 +115,7 @@ class Backbones(nn.Module):
 
         # text
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        txt_feats = outputs.pooler_output       # (B, txt_dim)
+        txt_feats = outputs.last_hidden_state       
 
         return (global_feats, patch_feats), txt_feats
 
@@ -112,6 +134,15 @@ class CrossModalFusion(nn.Module):
             num_heads (int, optional): Number of attention heads. Defaults to 4.
         """
         super().__init__()
+        # —— Self-attention for text and image features ——
+        self.txt_self_attn = PreFusionEnhancer(txt_dim, num_heads)
+        self.img_patch_self_attn = PreFusionEnhancer(img_dim, num_heads)
+        self.img_global_self_attn = PreFusionEnhancer(img_dim, num_heads)
+
+        # —— Text features attend to image patches ——
+        self.ln_img = nn.LayerNorm(joint_dim)
+        self.ln_txt = nn.LayerNorm(txt_dim)
+
         # —— Text queries attend to image patches ——
         self.query_txt    = nn.Linear(txt_dim, joint_dim)
         self.key_img      = nn.Linear(img_dim, joint_dim)
@@ -135,6 +166,12 @@ class CrossModalFusion(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.3)
         )
+        self.adapter = nn.Sequential(
+            nn.Linear(joint_dim, joint_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(joint_dim // 2, joint_dim)
+        )
 
     def forward(self, img_global, img_patch, txt_feats, return_attention=False):
         """
@@ -153,6 +190,10 @@ class CrossModalFusion(nn.Module):
         # img_global: (B, joint_dim)
         # img_patch:  (B, N_patches, img_dim)
         # txt_feats:  (B, txt_dim)
+        txt_feats = self.txt_self_attn(txt_feats)
+        img_global = self.img_global_self_attn(img_global.unsqueeze(1)).squeeze(1)
+        img_patch = self.img_patch_self_attn(img_patch)
+
         B, N, D = img_patch.shape
 
         # Text attends to image patches
@@ -178,8 +219,11 @@ class CrossModalFusion(nn.Module):
 
         # Concatenate and final projection
         att_img2txt_pooled = att_img2txt.mean(dim=1)
-        x = torch.cat([att_txt2img + img_global_updated, att_img2txt_pooled + txt_p] , dim=1)   # (B, joint_dim + txt_dim)
-        fused = self.output(x)                                                                  # (B, joint_dim)
+        x1 = self.ln_img(img_global_updated + att_txt2img)
+        x2 = self.ln_txt(txt_p + att_img2txt_pooled.mean(dim=1))
+        x = torch.cat([x1, x2], dim=1)                                                  # (B, joint_dim + txt_dim)
+        fused = self.output(x)
+        fused = fused + self.adapter(fused)                                             # (B, joint_dim)
 
         if return_attention:
             return fused, {'txt2img': attn_weights_txt2img, 'img2txt': attn_weights_img2txt}

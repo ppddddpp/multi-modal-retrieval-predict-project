@@ -17,6 +17,8 @@ class Config:
     cls_weight: float = 1.5
     cont_weight: float = 0.3
     num_heads: int = 32
+    num_fusion_layers: int = 3
+    use_shared_ffn: bool = True
     project_name: str = "multi-modal-retrieval-predict"
     # this will be auto‑generated
     run_name: str = field(init=False)
@@ -43,6 +45,8 @@ class Config:
             f"_cls={self.cls_weight}"
             f"_cont={self.cont_weight}"
             f"_gamma={self.gamma_focal}"
+            f"_fusion_layers={self.num_fusion_layers}"
+            f"_shared_ffn={self.use_shared_ffn}"
         )
 
     @staticmethod
@@ -74,5 +78,7 @@ class Config:
         data["fusion_type"] = str(data.get("fusion_type", "cross"))
         data["joint_dim"] = int(data.get("joint_dim", 1024))
         data["project_name"] = str(data.get("project_name", "multi-modal-retrieval-predict"))
+        data["num_fusion_layers"] = int(data.get("num_fusion_layers", 3))
+        data["use_shared_ffn"] = bool(data.get("use_shared_ffn", True))
 
         return Config(**data)

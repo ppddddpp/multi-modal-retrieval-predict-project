@@ -57,6 +57,8 @@ temperature = cfg.temperature                # temperature for contrastive loss
 cls_weight   = cfg.cls_weight                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
 cont_weight  = cfg.cont_weight                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 num_heads = cfg.num_heads                     # number of attention heads in the fusion model
+num_fusion_layers= cfg.num_fusion_layers
+use_shared_ffn = cfg.use_shared_ffn
 
 # --- Wandb ---
 project_name = cfg.project_name
@@ -259,11 +261,13 @@ if __name__ == '__main__':
     model = MultiModalRetrievalModel(
         joint_dim=JOINT_DIM,
         num_classes=len(label_cols),
+        num_fusion_layers=num_fusion_layers,
         num_heads=num_heads,
         fusion_type=FUSION_TYPE,
         swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
         device=device,
+        use_shared_ffn=cfg.use_shared_ffn,
         training=True
     ).to(device)
 
@@ -303,7 +307,7 @@ if __name__ == '__main__':
     best_f1 = 0
     best_auc = 0
     patience_counter = 0
-
+    
     print("Starting training...")
     # --- Training Loop ---
     for epoch in range(EPOCHS):
