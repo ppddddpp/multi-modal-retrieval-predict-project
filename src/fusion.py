@@ -191,13 +191,14 @@ class CrossModalFusion(nn.Module):
         # img_patch:  (B, N_patches, img_dim)
         # txt_feats:  (B, txt_dim)
         txt_feats = self.txt_self_attn(txt_feats)
+        txt_feats_pooled = txt_feats[:, 0]
         img_global = self.img_global_self_attn(img_global.unsqueeze(1)).squeeze(1)
         img_patch = self.img_patch_self_attn(img_patch)
 
         B, N, D = img_patch.shape
 
         # Text attends to image patches
-        Q_txt = self.query_txt(txt_feats).unsqueeze(1)      # (B, 1, joint_dim)
+        Q_txt = self.query_txt(txt_feats_pooled).unsqueeze(1)      # (B, 1, joint_dim)
         K_img = self.key_img(img_patch)                     # (B, N, joint_dim)
         V_img = self.value_img(img_patch)                   # (B, N, joint_dim)
         att_txt2img, attn_weights_txt2img = self.attn_txt2img(Q_txt, K_img, V_img)
@@ -205,8 +206,8 @@ class CrossModalFusion(nn.Module):
 
         # Image patches attend to text
         Q_img = self.query_img(img_patch)                   # (B, N, joint_dim)
-        K_txt = self.key_txt(txt_feats).unsqueeze(1)        # (B, 1, joint_dim)
-        V_txt = self.value_txt(txt_feats).unsqueeze(1)      # (B, 1, joint_dim)
+        K_txt = self.key_txt(txt_feats_pooled).unsqueeze(1)        # (B, 1, joint_dim)
+        V_txt = self.value_txt(txt_feats_pooled).unsqueeze(1)      # (B, 1, joint_dim)
         att_img2txt, attn_weights_img2txt = self.attn_img2txt(Q_img, K_txt, V_txt)
 
         img_patch_proj = self.img_patch_proj(img_patch)     # (B, N, joint_dim)
