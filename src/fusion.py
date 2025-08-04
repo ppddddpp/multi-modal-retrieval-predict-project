@@ -141,7 +141,7 @@ class CrossModalFusion(nn.Module):
 
         # —— Text features attend to image patches ——
         self.ln_img = nn.LayerNorm(joint_dim)
-        self.ln_txt = nn.LayerNorm(txt_dim)
+        self.ln_txt = nn.LayerNorm(joint_dim)
 
         # —— Text queries attend to image patches ——
         self.query_txt    = nn.Linear(txt_dim, joint_dim)
@@ -221,7 +221,8 @@ class CrossModalFusion(nn.Module):
         # Concatenate and final projection
         att_img2txt_pooled = att_img2txt.mean(dim=1)
         x1 = self.ln_img(img_global_updated + att_txt2img)
-        x2 = self.ln_txt(txt_p + att_img2txt_pooled.mean(dim=1))
+        txt_cls = txt_p[:, 0]
+        x2 = self.ln_txt(txt_cls + att_img2txt_pooled)
         x = torch.cat([x1, x2], dim=1)                                                  # (B, joint_dim + txt_dim)
         fused = self.output(x)
         fused = fused + self.adapter(fused)                                             # (B, joint_dim)

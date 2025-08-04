@@ -2,7 +2,7 @@ epochs:    50
 patience:  10
 batch_size: 1
 lr:        2e-5
-num_fusion_layers: 3
+num_fusion_layers: 5
 use_focal: false
 use_hybrid: true
 fusion_type: "cross"
