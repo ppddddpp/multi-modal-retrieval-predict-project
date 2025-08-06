@@ -188,7 +188,9 @@ class MultiModalRetrievalModel(nn.Module):
                 self.load_state_dict(state)
                 self.to(device)
                 self.eval()
-
+            else:
+                raise ValueError("checkpoint_path must be provided for inference")
+            
             if retriever:
                 self.retriever = retriever
             else:

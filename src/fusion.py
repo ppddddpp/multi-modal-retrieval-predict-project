@@ -104,7 +104,6 @@ class Backbones(nn.Module):
         self.bert   = load_hf_model_or_local(bert_model_name, local_dir=bert_local_dir)
         self.txt_dim = self.bert.config.hidden_size
 
-
     def forward(self, image, input_ids, attention_mask):
         # image
         patch_feats = self.swin_features(image)            # (B, H, W, C)
