@@ -189,3 +189,7 @@ You can visualize:
 * [NIH Open-i Dataset](https://openi.nlm.nih.gov/faq#collection)
 * SciSpaCy / ClinicalBERT / Swin Transformer
 * Captum (Facebook AI)
+
+## Trained model and embeddings 
+
+Can be found via [HuggingFace link](https://huggingface.co/ppddddpp/multi-modal-retrieval-predict)
