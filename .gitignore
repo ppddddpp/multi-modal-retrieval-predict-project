@@ -198,10 +198,12 @@ EDA_before_split.ipynb
 data_phrase_check.ipynb
 dataEDAnLabeledCheck.ipynb
 finalOutputDataEDA.ipynb
+uploadHF.py
 
 # Ignore additional files and folders
 cudaCheck.ipynb
 wandb
+upload
 embeddings
 checkpoints
 attention_maps

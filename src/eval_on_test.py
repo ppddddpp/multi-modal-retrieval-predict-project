@@ -66,12 +66,14 @@ def main():
     model = MultiModalRetrievalModel(
         joint_dim=cfg.joint_dim,
         num_heads=cfg.num_heads,
+        num_fusion_layers=cfg.num_fusion_layers,
         num_classes=len(label_cols),
         fusion_type=cfg.fusion_type,
         swin_ckpt_path=BASE_DIR / "models" / "swin_checkpoint.safetensors",
         bert_local_dir=BASE_DIR / "models" / "clinicalbert_local",
         checkpoint_path=str(CKPT_PATH),
         device=device,
+        use_shared_ffn=cfg.use_shared_ffn,
         training=False
     ).to(device)
 

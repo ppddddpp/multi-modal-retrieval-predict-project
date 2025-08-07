@@ -1,8 +1,9 @@
 # Multimodal Medical Image Retrieval & Explanation
 
-This project performs **multimodal retrieval** from chest X-rays and radiology reports using deep learning. It supports:
+This is a HCMUS final project which performs **multimodal predict and retrieval** from chest X-rays and radiology reports using deep learning. It supports:
 
 * Disease-aware joint embeddings from image and text (DICOM + report)
+* Making prediction
 * Retrieval evaluation via relevance ground truth
 * Visual explanations (attention + Integrated Gradients)
 * Web interface for demo and debugging
@@ -102,11 +103,11 @@ Split and label CSVs should already exist in `splited_data/`. If not, create the
 
 ### 5. Generate Embeddings
 
+Embedding for retrieval can be generate while train `.npy` and `.json` files under `embeddings/` or get from testset when run:
+
 ```bash
 python src/contruct_test_db.py
 ```
-
-This will generate `.npy` and `.json` files under `embeddings/`.
 
 ---
 
@@ -132,7 +133,7 @@ Then open `http://127.0.0.1:5000` in your browser.
 
 ## Configuration
 
-Edit YAML under `config/`, e.g., `config/config.yaml`:
+Edit YAML under `config/`, which `config/config.yaml` for model setup for example:
 
 ```yaml
 epochs: 50

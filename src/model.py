@@ -346,7 +346,7 @@ class MultiModalRetrievalModel(nn.Module):
         # Lazy-init explainer
         if self.explainer is None:
             self.explainer = ExplanationEngine(
-                fusion_model=self.fusion,
+                fusion_model=self.fusion_layers[-1],
                 classifier_head=self.classifier,
                 image_size=self.image_size,
                 ig_steps=self.ig_steps,
@@ -360,12 +360,17 @@ class MultiModalRetrievalModel(nn.Module):
             attention_mask.to(self.device)
         )
 
-        # Compute attention + IG maps
+        # Extract attention maps
+        layer_key = f"layer_{len(self.fusion_layers) - 1}_txt2img"
+        attn_weights_expl = {
+            'txt2img': attn_weights[layer_key]
+        }
+
         maps = self.explainer.explain(
             img_global=img_global,
             img_patches=img_patches,
             txt_feats=txt_feats,
-            attn_weights=attn_weights,
+            attn_weights=attn_weights_expl,
             targets=targets
         )
 
