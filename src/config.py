@@ -13,6 +13,7 @@ class Config:
     joint_dim: int = 1024
     gamma_focal: float = 1.0
     focal_ratio: float = 0.3
+    text_dim: int = 768
     temperature: float = 0.125
     cls_weight: float = 1.5
     cont_weight: float = 0.3
@@ -41,6 +42,7 @@ class Config:
             f"_lr={self.lr:.0e}"
             f"_jd={self.joint_dim}"
             f"_nh={self.num_heads}"
+            f"_t={self.text_dim}"
             f"_temp={self.temperature}"
             f"_cls={self.cls_weight}"
             f"_cont={self.cont_weight}"
@@ -73,6 +75,7 @@ class Config:
         data["cls_weight"] = float(data.get("cls_weight", 1.5))
         data["cont_weight"] = float(data.get("cont_weight", 0.3))
         data["num_heads"] = int(data.get("num_heads", 32))
+        data["text_dim"] = int(data.get("text_dim", 768))
         data["use_focal"] = bool(data.get("use_focal", False))
         data["use_hybrid"] = bool(data.get("use_hybrid", True))
         data["fusion_type"] = str(data.get("fusion_type", "cross"))

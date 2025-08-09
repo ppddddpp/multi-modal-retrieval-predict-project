@@ -139,7 +139,7 @@ def index():
             return_tensors="pt",
             padding="max_length",
             truncation=True,
-            max_length=512
+            max_length=cfg.text_dim
         )
         txt_ids  = tokens.input_ids.to(device)
         txt_mask = tokens.attention_mask.to(device)

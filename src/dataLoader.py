@@ -37,6 +37,7 @@ def build_dataloader(
         std=0.5, 
         tokenizer=None, 
         augment=False,
+        max_length=128,
         sampler: WeightedRandomSampler = None
 ):
     """
@@ -51,6 +52,8 @@ def build_dataloader(
         std (float, optional): Image normalization std. Defaults to 0.5.
         tokenizer (transformers.AutoTokenizer, optional): Defaults to None.
         augment (bool, optional): Defaults to False.
+        max_length (int, optional): Maximum length of text tokenization. Defaults to 128.
+        sampler (torch.utils.data.WeightedRandomSampler, optional): Defaults to None.
 
     Returns:
         torch.utils.data.DataLoader
@@ -62,7 +65,7 @@ def build_dataloader(
             cache_dir=str(MODEL_PLACE / "clinicalbert")
         )
     dataset = ChestXRDataset(records, image_preprocessor=preprocessor,
-                             tokenizer=tokenizer)
+                             tokenizer=tokenizer, max_length=max_length)
     if sampler is not None:
         return DataLoader(dataset,
                           batch_size=batch_size,

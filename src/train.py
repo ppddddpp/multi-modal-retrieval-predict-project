@@ -59,6 +59,7 @@ cont_weight  = cfg.cont_weight                  # focuses on pulling matching (i
 num_heads = cfg.num_heads                     # number of attention heads in the fusion model
 num_fusion_layers= cfg.num_fusion_layers
 use_shared_ffn = cfg.use_shared_ffn
+text_dim = cfg.text_dim
 
 # --- Wandb ---
 project_name = cfg.project_name
@@ -223,13 +224,15 @@ if __name__ == '__main__':
         train_records,
         batch_size=BATCH_SIZE,
         mean=0.5, std=0.25,
-        sampler=sampler
+        sampler=sampler,
+        max_length=text_dim
     )
 
     val_loader = build_dataloader(
         val_records,
         batch_size=BATCH_SIZE,
-        mean=0.5, std=0.25
+        mean=0.5, std=0.25,
+        max_length=text_dim
     )
 
     # --- Loss weights & criterion ---

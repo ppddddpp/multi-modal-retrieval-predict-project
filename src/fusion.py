@@ -27,7 +27,7 @@ class PreFusionEnhancer(nn.Module):
     def forward(self, x):  # x: (B, L, D)
         B, L, D = x.shape
         x = x + self.pos_embed[:, :L]  # Add trainable positional embedding
-        x2, _ = self.self_attn(x, x, x)
+        x2, _ = self.self_attn(x, x, x) # Self attention for each token
         x = self.norm1(self.alpha * x + self.dropout(x2))
         return x
 
@@ -209,18 +209,21 @@ class CrossModalFusion(nn.Module):
         V_txt = self.value_txt(txt_feats_pooled).unsqueeze(1)      # (B, 1, joint_dim)
         att_img2txt, attn_weights_img2txt = self.attn_img2txt(Q_img, K_txt, V_txt)
 
+        # Pool fused patches to get updated patch image vector
         img_patch_proj = self.img_patch_proj(img_patch)     # (B, N, joint_dim)
         patches_fused = img_patch_proj + att_img2txt      
 
         # Pool fused patches to get updated global image vector
         img_global_proj = self.img_global_proj(img_global)                              # (B, joint_dim)
         img_global_updated = patches_fused.mean(dim=1) + img_global_proj                    
+        
+        # Pool text features
         txt_p = self.txt_proj(txt_feats)
+        txt_cls = txt_p[:, 0]
 
         # Concatenate and final projection
         att_img2txt_pooled = att_img2txt.mean(dim=1)
         x1 = self.ln_img(img_global_updated + att_txt2img)
-        txt_cls = txt_p[:, 0]
         x2 = self.ln_txt(txt_cls + att_img2txt_pooled)
         x = torch.cat([x1, x2], dim=1)                                                  # (B, joint_dim + txt_dim)
         fused = self.output(x)
