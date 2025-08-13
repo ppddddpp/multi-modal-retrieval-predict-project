@@ -8,7 +8,7 @@ use_hybrid: true
 fusion_type: "cross"
 joint_dim: 1024
 gamma_focal: 1
-text_dim: 768
+text_dim: 512
 focal_ratio: 0.3
 temperature: 0.125
 cls_weight: 1.5
