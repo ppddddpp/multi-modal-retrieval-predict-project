@@ -33,16 +33,18 @@
                     <input type="file" class="form-control" id="dicom_file" name="dicom_file" accept=".dcm" required />
                 </div>
                 <div class="col-md-6">
-                    <label for="text_query" class="form-label">Report Text</label>
+                    <label for="text_query" class="form-label">Report Text / Query</label>
                     <input type="text" class="form-control" id="text_query" name="text_query"
                         value="(Put your report about the DICOM here)" required />
                 </div>
+
                 <div class="col-12 form-check">
                     <input class="form-check-input" type="checkbox" id="show_image" name="show_image" checked />
                     <label class="form-check-label" for="show_image">
                         Show original DICOM image
                     </label>
                 </div>
+
                 <div class="col-12 form-check">
                     <input class="form-check-input" type="checkbox" id="show_retrieval_detail"
                         name="show_retrieval_detail" />
@@ -50,6 +52,7 @@
                         Show retrieval reports & labels
                     </label>
                 </div>
+
                 <div class="col-md-6">
                     <label for="threshold" class="form-label">Prediction Threshold</label>
                     <input type="range" class="form-range" id="threshold" name="threshold" min="0.1" max="0.9"
@@ -57,18 +60,16 @@
                         oninput="document.getElementById('threshold_val').textContent = this.value">
                     <div>Current: <span id="threshold_val">0.5</span></div>
                     <div class="form-text text-muted">
-                        <strong>Lower threshold</strong> → more sensitive (detects more positives, but increases false
-                        positives).<br>
-                        <strong>Higher threshold</strong> → more specific (fewer false positives, but may miss subtle
-                        findings).
+                        <strong>Lower threshold</strong> → more sensitive (detects more positives).<br>
+                        <strong>Higher threshold</strong> → more specific (fewer false positives).
                     </div>
                 </div>
+
                 <div class="col-12">
                     <button type="submit" class="btn btn-primary">
                         Predict & Explain
                     </button>
                 </div>
-
             </form>
         </div>
 
@@ -90,49 +91,64 @@
         </div>
         {% endif %}
 
-        {% if topk_labels_with_probs %}
+        <!-- Top-K predicted labels with probabilities -->
+        {% if topk_idx %}
         <div class="card mb-4 p-4">
-            <h2 class="card-title mb-3">Top {{ topk_labels_with_probs|length }} Predicted Labels with Probabilities</h2>
+            <h2 class="card-title mb-3">Top Predictions (with probabilities)</h2>
             <ul class="list-group list-group-flush">
-                {% for item in topk_labels_with_probs %}
+                {% for i in range(topk_idx|length) %}
                 <li class="list-group-item bg-transparent text-light">
-                    {{ item.label }}: {{ "%.4f"|format(item.prob) }}
+                    {{ topk_labels[i] if topk_labels and topk_labels|length > i else ("Label " ~ topk_idx[i]) }}:
+                    {{ "%.4f"|format(topk_vals[i]) if topk_vals and topk_vals|length > i else "n/a" }}
                 </li>
                 {% endfor %}
             </ul>
         </div>
         {% endif %}
 
-        <!-- Visualizations -->
-        {% if img_orig or attn_map or ig_map or hybrid_map %}
+        <!-- Visualizations (Query image + overlays) -->
+        {% if img_orig or attn_map_q_b64 or ig_map_q_b64 or hybrid_q_b64 %}
         <div class="card mb-4 p-4">
-            <h2 class="card-title mb-3">Visualizations</h2>
-            <div class="row g-3">
+            <h2 class="card-title mb-3">Visualizations (Query)</h2>
+            <div class="row g-3 align-items-start">
                 {% if show_image and img_orig %}
                 <div class="col-md-6 col-lg-3 text-center">
-                    <h5>Original</h5>
+                    <h6>Original</h6>
                     <img src="data:image/png;base64,{{ img_orig }}" class="img-fluid rounded shadow-sm" />
                 </div>
                 {% endif %}
-                {% if attn_map %}
+                {% if attn_map_q_b64 %}
                 <div class="col-md-6 col-lg-3 text-center">
-                    <h5>Attention Map</h5>
-                    <img src="data:image/png;base64,{{ attn_map }}" class="img-fluid rounded shadow-sm" />
+                    <h6>Attention Map</h6>
+                    <img src="data:image/png;base64,{{ attn_map_q_b64 }}" class="img-fluid rounded shadow-sm" />
                 </div>
                 {% endif %}
-                {% if ig_map %}
+                {% if ig_map_q_b64 %}
                 <div class="col-md-6 col-lg-3 text-center">
-                    <h5>Integrated Gradients</h5>
-                    <img src="data:image/png;base64,{{ ig_map }}" class="img-fluid rounded shadow-sm" />
+                    <h6>Integrated Gradients</h6>
+                    <img src="data:image/png;base64,{{ ig_map_q_b64 }}" class="img-fluid rounded shadow-sm" />
                 </div>
                 {% endif %}
-                {% if hybrid_map %}
+                {% if hybrid_q_b64 %}
                 <div class="col-md-6 col-lg-3 text-center">
-                    <h5>Hybrid Overlay</h5>
-                    <img src="data:image/png;base64,{{ hybrid_map }}" class="img-fluid rounded shadow-sm" />
+                    <h6>Hybrid Overlay</h6>
+                    <img src="data:image/png;base64,{{ hybrid_q_b64 }}" class="img-fluid rounded shadow-sm" />
                 </div>
                 {% endif %}
             </div>
+
+            {% if explain_metrics %}
+            <div class="mt-3">
+                <h6>Explain Metrics (query)</h6>
+                <div class="row">
+                    <div class="col-sm-3"><strong>Pearson:</strong> {{ explain_metrics.pearson }}</div>
+                    <div class="col-sm-3"><strong>Spearman:</strong> {{ explain_metrics.spearman }}</div>
+                    <div class="col-sm-3"><strong>IoU top-5%:</strong> {{ explain_metrics.iou_top5pct }}</div>
+                    <div class="col-sm-3"><strong>IoU top-20%:</strong> {{ explain_metrics.iou_top20pct }}</div>
+                </div>
+                <div class="mt-2"><small>Explain runtime (s): {{ explain_metrics.predict_time_s }}</small></div>
+            </div>
+            {% endif %}
         </div>
         {% endif %}
 
@@ -146,23 +162,84 @@
                     <h2 class="accordion-header" id="heading{{ loop.index }}">
                         <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
                             data-bs-target="#collapse{{ loop.index }}">
-                            {{ item.id }} — dist {{ "%.2f"|format(item.dist) }}
+                            {{ item.id }} — dist {{ "%.3f"|format(item.dist) }}
                         </button>
                     </h2>
                     <div id="collapse{{ loop.index }}" class="accordion-collapse collapse"
                         data-bs-parent="#retrievalAccordion">
                         <div class="accordion-body">
-                            {% if item.image %}
-                            <img src="data:image/png;base64,{{ item.image }}" class="img-fluid mb-3" alt="Retrieved" />
-                            {% endif %}
+                            <div class="row">
+                                <div class="col-md-6">
+                                    {% if item.image %}
+                                    <h6>Retrieved Image</h6>
+                                    <img src="data:image/png;base64,{{ item.image }}" class="img-fluid mb-2"
+                                        alt="Retrieved" />
+                                    {% endif %}
+                                </div>
+
+                                <div class="col-md-6">
+                                    <h6>Overlays (retrieved)</h6>
+                                    <div class="d-flex gap-2 flex-wrap">
+                                        {% if item.attn_b64 %}
+                                        <div class="text-center" style="width:140px">
+                                            <small>Attention</small>
+                                            <img src="data:image/png;base64,{{ item.attn_b64 }}"
+                                                class="img-fluid rounded" />
+                                        </div>
+                                        {% endif %}
+                                        {% if item.ig_b64 %}
+                                        <div class="text-center" style="width:140px">
+                                            <small>IG</small>
+                                            <img src="data:image/png;base64,{{ item.ig_b64 }}"
+                                                class="img-fluid rounded" />
+                                        </div>
+                                        {% endif %}
+                                        {% if item.hybrid_b64 %}
+                                        <div class="text-center" style="width:140px">
+                                            <small>Hybrid</small>
+                                            <img src="data:image/png;base64,{{ item.hybrid_b64 }}"
+                                                class="img-fluid rounded" />
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <hr />
+
                             <p><strong>Labels:</strong></p>
                             <ul>
                                 {% for label in item.labels %}
                                 <li>{{ label }}</li>
                                 {% endfor %}
                             </ul>
+
                             <p><strong>Report:</strong></p>
-                            <pre>{{ item.report }}</pre>
+                            <pre style="white-space: pre-wrap;">{{ item.report }}</pre>
+
+                            {% if item.cross_metrics %}
+                            <hr />
+                            <h6>Cross-image comparison (query vs retrieved)</h6>
+                            <div class="table-responsive">
+                                <table class="table table-sm table-bordered">
+                                    <thead>
+                                        <tr>
+                                            <th>Metric</th>
+                                            <th>Value</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for k,v in item.cross_metrics.items() %}
+                                        <tr>
+                                            <td>{{ k.replace('_',' ') }}</td>
+                                            <td>{{ v }}</td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                            {% endif %}
+
                         </div>
                     </div>
                 </div>

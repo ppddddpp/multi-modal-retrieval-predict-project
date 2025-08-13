@@ -3,7 +3,7 @@ import numpy as np
 import json
 from typing import Tuple, List
 from sklearn.metrics.pairwise import cosine_similarity
-import os
+import heapq
 from pathlib import Path
 import pickle
 
@@ -118,63 +118,62 @@ class DLSRetrievalEngine(RetrievalEngine):
         candidate_multiplier: int = 10
     ) -> Tuple[List[str], List[float]]:
         """
-        Sublinear DLS retrieval via greedy graph-walk.
-
-        Args:
-            query_emb          (np.ndarray): Query embedding (1, D)
-            K                       (int): Number of results
-            seed_size               (int): Initial random seeds
-            max_steps               (int): Max graph-walk iterations
-            candidate_multiplier    (int): How many candidates to keep each round
+        Sublinear DLS retrieval via greedy graph-walk using a heap-based candidate pool.
         """
-        # flatten and normalize
         q = query_emb.astype("float32").reshape(-1)
         N = self.embs.shape[0]
 
-        # sanity-check graph length
         if len(self.link_graph) != N:
             raise RuntimeError(
                 f"Link graph size {len(self.link_graph)} != embeddings {N}. "
                 "Rebuild or delete your pickle."
             )
 
-        # Sample seeds
+        # --- Seed selection ---
         seeds = np.random.choice(N, size=seed_size, replace=False).tolist()
         visited = set(seeds)
 
-        # Score seeds
-        scored = []
+        # --- Initial scoring: heap stores (-similarity, idx) so heapq gives max-sim first
+        heap = []
         for idx in seeds:
             sim = float(self.embs[idx] @ q / (np.linalg.norm(self.embs[idx]) * np.linalg.norm(q) + 1e-6))
-            scored.append((sim, idx))
-        scored.sort(reverse=True)
+            heapq.heappush(heap, (-sim, idx))
 
-        # Greedily traverse the graph
+        R = max(candidate_multiplier * K, seed_size)
         steps = 0
-        while steps < max_steps:
-            best_sim, best_idx = scored[0]
+
+        # --- Greedy graph walk ---
+        while steps < max_steps and heap:
+            # Pop best candidate
+            neg_sim, best_idx = heapq.heappop(heap)
+            best_sim = -neg_sim
             improved = False
 
+            # Expand neighbors
             for nbr in self.link_graph[best_idx]:
-                # skip invalid or seen
                 if nbr < 0 or nbr >= N or nbr in visited:
                     continue
                 visited.add(nbr)
                 nbr_sim = float(self.embs[nbr] @ q / (np.linalg.norm(self.embs[nbr]) * np.linalg.norm(q) + 1e-6))
-                scored.append((nbr_sim, nbr))
+                heapq.heappush(heap, (-nbr_sim, nbr))
                 improved = True
+
+            # Keep heap size bounded
+            if len(heap) > R:
+                heap = heapq.nsmallest(R, heap)  # keeps best R (lowest neg_sim)
+                heapq.heapify(heap)
 
             if not improved:
                 break
 
-            # prune to top candidates
-            scored.sort(reverse=True)
-            scored = scored[: max(candidate_multiplier * K, seed_size)]
             steps += 1
-            
-        topk  = scored[:K]
-        ids   = [ self.ids[idx] for _, idx in topk ]
-        scores= [ sim      for sim, _ in topk ]
+
+        # --- Get top-K sorted by similarity
+        topk = heapq.nsmallest(K, heap)
+        topk = sorted([(-neg_sim, idx) for neg_sim, idx in topk], reverse=True)
+
+        ids = [self.ids[idx] for _, idx in topk]
+        scores = [sim for sim, _ in topk]
         return ids, scores
 
 def make_retrieval_engine(

@@ -32,58 +32,112 @@ class ExplanationEngine:
         grid_size: int
     ) -> np.ndarray:
         # attn_tensor: (B,1,N_patches) or (1,1,N_patches)
-        # Here we support batch dimension by taking first element
         scores = attn_tensor[0].squeeze().cpu()                  # (N,)
         scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
         grid   = scores.view(1,1,grid_size,grid_size)           # (1,1,G,G)
         up     = F.interpolate(grid, size=self.image_size, mode='bilinear', align_corners=False)
         return up.squeeze().detach().numpy()                             # (H,W)
 
-    def compute_ig_map_for_target(
-        self,
-        img_global: torch.Tensor,
-        img_patches: torch.Tensor,
-        txt_feats: torch.Tensor,
-        target: int
-    ) -> np.ndarray:
+    def _forward_patches_batchfirst(self, img_patches, txt_feats, target_idx):
         """
-        Run IG for one target, using both image and text features.
-        img_global: (1, D_img); img_patches: (1, N, D_patch); txt_feats: (1, D_txt)
+        img_patches : (B, Np, E) or (B, G1, G2, E)
+        txt_feats   : (B, T, E)
+        Returns logits for the requested target index (shape: (B,1))
         """
-        img_global  = img_global.to(self.device)
-        img_patches = img_patches.to(self.device)
-        txt_feats   = txt_feats.to(self.device)
+        # Flatten if 4D -> (B, G1*G2, E)
+        if img_patches.dim() == 4:
+            B, G1, G2, E = img_patches.shape
+            img_patches = img_patches.view(B, G1 * G2, E)
+        elif img_patches.dim() != 3:
+            raise ValueError(f"img_patches must be 3D or 4D, got {tuple(img_patches.shape)}")
 
-        # fuse with gradient tracking
-        output = self.fusion_model(
-            img_global.requires_grad_(True),
-            img_patches.requires_grad_(True),
-            txt_feats.requires_grad_(True),
-            return_attention=False
+        # keep batch-first and contiguous
+        img_patches = img_patches.contiguous()
+        txt_feats = txt_feats.contiguous()
+
+        # create img_global as mean over patches (same as training)
+        img_global = img_patches.mean(dim=1)   # (B, E)
+
+        # Call fusion layer — it returns (fused, attn_dict) or (fused, None)
+        fusion_out = self.fusion_model(
+            img_global = img_global,
+            img_patch  = img_patches,
+            txt_feats  = txt_feats,
+            return_attention = False
         )
 
-        if isinstance(output, tuple):
-            fused = output[0]
+        # normalize handling: fusion_out can be tuple (fused, attn) or a single tensor
+        if isinstance(fusion_out, tuple) or isinstance(fusion_out, list):
+            fused = fusion_out[0]
         else:
-            fused = output
+            fused = fusion_out
 
-        # wrapper returns the logit for `target`
-        def _wrapper(x):
-            return self.classifier_head.to(self.device)(x)[:, target]
+        # fused should be (B, joint_dim); now run classifier_head to get logits (B, num_classes)
+        logits = self.classifier_head(fused)
 
-        # move fused to CPU to avoid GPU/Captum issues
-        fused_for_ig = fused.detach().to(self.device)
+        # return logits for the requested class index
+        return logits[:, target_idx].unsqueeze(-1)
 
-        ig = IntegratedGradients(_wrapper)
-        baseline = torch.zeros_like(fused_for_ig)
-        attr     = ig.attribute(fused_for_ig, baselines=baseline, n_steps=self.ig_steps)  # (1, D)
-        
-        heat     = attr.squeeze(0)
-        heat     = (heat - heat.min()) / (heat.max() - heat.min() + 1e-8)
-        G        = int(heat.shape[0] ** 0.5)
-        grid     = heat.view(1,1,G,G)
-        up       = F.interpolate(grid, size=self.image_size, mode='bilinear', align_corners=False)
-        return up.squeeze().cpu().numpy()  # (H,W)
+
+    def compute_ig_map_for_target(self, img_global, img_patches, txt_feats, target_idx, steps=50, internal_batch_size=1):
+        """
+        Returns HxW IG heatmap over image patches for the first item in the batch.
+        - img_patches: (B, Np, E)  or (B, G, G, E)
+        - txt_feats:   (B, T, E)
+        """
+        # Ensure inputs are on the right device and have proper grad settings
+        img_patches = img_patches.clone().detach().to(self.device).requires_grad_(True)
+        txt_feats   = txt_feats.clone().detach().to(self.device)  # text is fixed, no grads
+
+        # Use IntegratedGradients with a forward that accepts only the image patches
+        ig = IntegratedGradients(lambda ip: self._forward_patches_batchfirst(ip, txt_feats, target_idx))
+
+        # Baseline = zeros like image patches
+        baselines = torch.zeros_like(img_patches, device=self.device)
+
+        # Attribute (use small internal_batch_size to reduce memory / intermediate views)
+        attributions = ig.attribute(
+            inputs=img_patches,
+            baselines=baselines,
+            n_steps=steps,
+            internal_batch_size=internal_batch_size
+        )  # (B, Np, E) or (B, G, G, E)
+
+        # Reduce embed dim to single importance per patch
+        if attributions.dim() == 4:
+            B, G1, G2, E = attributions.shape
+            assert G1 == G2, f"Expected square grid for patches, got {G1}x{G2}"
+            att = attributions.norm(p=1, dim=-1).view(B, G1 * G2)  # L1 over E
+            G = G1
+            att = att.view(B, G, G)
+        else:
+            B, Np, E = attributions.shape
+            G = int(Np ** 0.5)
+            assert G * G == Np, f"Number of patches {Np} is not a perfect square"
+            att = attributions.norm(p=1, dim=-1)  # (B, Np)
+            att = att.view(B, G, G)
+
+        # ensure float
+        att = att.to(dtype=torch.float32)
+
+        # robust min/max over last two dims (works across PyTorch versions)
+        try:
+            min_vals = att.amin(dim=(-2, -1), keepdim=True)   # (B,1,1)
+            max_vals = att.amax(dim=(-2, -1), keepdim=True)   # (B,1,1)
+        except Exception:
+            flat = att.view(B, -1)                             # (B, G*G)
+            min_vals = flat.min(dim=1, keepdim=True)[0].view(B, 1, 1)
+            max_vals = flat.max(dim=1, keepdim=True)[0].view(B, 1, 1)
+
+        # Normalize to [0,1] safely
+        range_vals = (max_vals - min_vals)
+        att = (att - min_vals) / (range_vals + 1e-8)
+        att = att.clamp(0.0, 1.0)
+
+        # guard against any NaNs
+        att = torch.nan_to_num(att, nan=0.0, posinf=1.0, neginf=0.0)
+
+        return att[0].detach().cpu().numpy()
 
     def explain(
         self,
