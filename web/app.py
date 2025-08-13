@@ -14,6 +14,7 @@ matplotlib.use("Agg")  # Use non-interactive backend for rendering images
 import matplotlib.pyplot as plt
 import pandas as pd
 from transformers import AutoTokenizer
+import torch.nn.functional as F
 
 from config import Config
 from tensorDICOM import DICOMImagePreprocessor
@@ -21,7 +22,7 @@ from model import MultiModalRetrievalModel
 from labeledData import disease_groups, normal_groups
 from dataParser import parse_openi_xml
 from retrieval import make_retrieval_engine
-from helper import compare_maps, heatmap_to_base64_overlay
+from helper import compare_maps, heatmap_to_base64_overlay, compute_gradcam_map_for_target
 plt.ioff()
 
 # ── Project directories ────────────────────────────────────────────────────────
@@ -125,6 +126,12 @@ def np_to_base64_img(arr: np.ndarray, cmap="gray") -> str:
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("ascii")
 
+def resize_to_match(src_map, target_shape):
+    """Resize src_map (H,W) to target_shape (H2,W2) using bilinear interpolation."""
+    src_tensor = torch.tensor(src_map, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+    resized = F.interpolate(src_tensor, size=target_shape, mode="bilinear", align_corners=False)
+    return resized.squeeze().numpy()
+
 def to_numpy(x):
     """Return a numpy array whether x is a torch tensor or numpy already."""
     if x is None:
@@ -181,6 +188,9 @@ def index():
         ig_maps_q  = out.get('ig_maps', {}) or {}               # dict target->np
         ig_maps_q = {int(k): to_numpy(v) for k,v in ig_maps_q.items()}
 
+        gradcam_maps_q = out.get('gradcam_maps', {}) or {}
+        gradcam_maps_q = {int(k): to_numpy(v) for k,v in gradcam_maps_q.items()}
+
         # pick which IG target to show: prefer topk[0] if available
         topk_idx = safe_unpack_topk(out.get("topk_idx", []))
         topk_vals = safe_unpack_topk(out.get("topk_vals", []))
@@ -199,6 +209,7 @@ def index():
         context['attn_map_q_b64'] = None
         context['ig_map_q_b64']   = None
         context['hybrid_q_b64']   = None
+        context['gradcam_map_q_b64'] = None
 
         if att_map_q is not None:
             try:
@@ -215,11 +226,23 @@ def index():
 
         if att_map_q is not None and main_target is not None and main_target in ig_maps_q:
             try:
-                hybrid_q = (att_map_q * ig_maps_q[main_target])
+                if att_map_q.shape != ig_maps_q[main_target].shape:
+                    ig_resized = resize_to_match(ig_maps_q[main_target], att_map_q.shape)
+                else:
+                    ig_resized = ig_maps_q[main_target]
+
+                hybrid_q = (att_map_q * ig_resized)
                 hybrid_q = (hybrid_q - hybrid_q.min()) / (hybrid_q.max() - hybrid_q.min() + 1e-8)
                 context['hybrid_q_b64'] = heatmap_to_base64_overlay(orig_arr, hybrid_q, alpha=0.55)
             except Exception as e:
                 print(f"[WARN] query hybrid overlay failed: {e}")
+
+        if main_target is not None and main_target in gradcam_maps_q:
+            try:
+                gc_q = gradcam_maps_q[main_target]
+                context['gradcam_map_q_b64'] = heatmap_to_base64_overlay(orig_arr, gc_q, alpha=0.45)
+            except Exception as e:
+                print(f"[WARN] query Grad-CAM overlay failed: {e}")
 
         # compute quick numeric comparisons for the query's own att vs ig
         if att_map_q is not None and main_target is not None and main_target in ig_maps_q:
@@ -238,6 +261,19 @@ def index():
                 context['explain_metrics'] = None
         else:
             context['explain_metrics'] = None
+
+        if main_target is not None and main_target in gradcam_maps_q:
+            try:
+                metrics_gc_5 = compare_maps(att_map_q, gradcam_maps_q[main_target], topk_frac=0.05)
+                metrics_gc_20 = compare_maps(att_map_q, gradcam_maps_q[main_target], topk_frac=0.20)
+                context['gradcam_metrics'] = {
+                    'pearson': round(metrics_gc_5.get('pearson', 0.0), 4),
+                    'spearman': round(metrics_gc_5.get('spearman', 0.0), 4),
+                    'iou_top5pct': round(metrics_gc_5.get('iou_top5pct', 0.0), 4),
+                    'iou_top20pct': round(metrics_gc_20.get('iou_top20pct', 0.0), 4)
+                }
+            except Exception as e:
+                print(f"[WARN] compare_maps(gradcam) failed: {e}")
 
         # --- Preds / topk ---
         preds_arr = to_numpy(out.get("preds", None))
@@ -260,6 +296,7 @@ def index():
 
         # --- If user wants detailed retrieval: compute visuals & comparisons for each retrieved image ---
         retrieval_detailed = []
+        retrieved_att_maps = []
         if show_detail and retrieval_pairs:
             for rid, dist in retrieval_pairs:
                 try:
@@ -302,6 +339,9 @@ def index():
                         print(f"[WARN] failed to compute retrieved attention for {rid}: {e}")
                         att_map_r = None
 
+                    if att_map_r is not None:
+                        retrieved_att_maps.append(att_map_r)
+
                     # compute IG map for the same main_target (if available)
                     ig_map_r = None
                     if main_target is not None:
@@ -340,6 +380,28 @@ def index():
                         except Exception as e:
                             print(f"[WARN] render retrieved hybrid overlay {rid} failed: {e}")
 
+                    # Compute Grad-CAM for retrieved image
+                    gradcam_map_r = None
+                    if main_target is not None:
+                        try:
+                            (img_global_r, img_patches_r), txt_feats_r = model.backbones(
+                                dcm_tensor.unsqueeze(0).to(device),
+                                txt_ids, txt_mask
+                            )
+                            gradcam_map_r = model.explainer.compute_gradcam_map_for_target(
+                                img_global_r[0:1], img_patches_r[0:1], txt_feats_r[0:1], int(main_target)
+                            )
+                        except Exception as e:
+                            print(f"[WARN] Grad-CAM for retrieved {rid} failed: {e}")
+
+                    # Grad-CAM overlay
+                    gradcam_b64_r = None
+                    if gradcam_map_r is not None:
+                        try:
+                            gradcam_b64_r = heatmap_to_base64_overlay(orig_arr_r, gradcam_map_r, alpha=0.45)
+                        except Exception as e:
+                            print(f"[WARN] render retrieved Grad-CAM overlay {rid} failed: {e}")
+
                     # compute cross-image comparisons (query vs retrieved)
                     cross_metrics = {}
                     try:
@@ -358,6 +420,14 @@ def index():
                             cross_metrics['ig_spearman_top5pct'] = round(cm_ig_5.get('spearman', 0.0), 4)
                             cross_metrics['ig_iou_top5pct'] = round(cm_ig_5.get('iou_top5pct', 0.0), 4)
                             cross_metrics['ig_iou_top20pct'] = round(cm_ig_20.get('iou_top20pct', 0.0), 4)
+                        # Grad-CAM cross metrics
+                        if gradcam_map_r is not None and main_target in gradcam_maps_q:
+                            cm_gc_5 = compare_maps(gradcam_maps_q[main_target], gradcam_map_r, topk_frac=0.05)
+                            cm_gc_20 = compare_maps(gradcam_maps_q[main_target], gradcam_map_r, topk_frac=0.20)
+                            cross_metrics['gradcam_pearson_top5pct'] = round(cm_gc_5.get('pearson', 0.0), 4)
+                            cross_metrics['gradcam_spearman_top5pct'] = round(cm_gc_5.get('spearman', 0.0), 4)
+                            cross_metrics['gradcam_iou_top5pct'] = round(cm_gc_5.get('iou_top5pct', 0.0), 4)
+                            cross_metrics['gradcam_iou_top20pct'] = round(cm_gc_20.get('iou_top20pct', 0.0), 4)
                     except Exception as e:
                         print(f"[WARN] cross-compare failed for {rid}: {e}")
 
@@ -369,6 +439,7 @@ def index():
                         "image": img_b64,
                         "attn_b64": attn_b64_r,
                         "ig_b64": ig_b64_r,
+                        "gradcam_b64": gradcam_b64_r, 
                         "hybrid_b64": hybrid_b64_r,
                         "cross_metrics": cross_metrics
                     })
@@ -376,6 +447,18 @@ def index():
                 except Exception as e:
                     print(f"[WARN] Retrieval detail failed for {rid}: {e}")
 
+            if len(retrieved_att_maps) > 1:
+                overlaps = []
+                for i in range(len(retrieved_att_maps)):
+                    for j in range(i + 1, len(retrieved_att_maps)):
+                        cm = compare_maps(retrieved_att_maps[i], retrieved_att_maps[j], topk_frac=0.05)
+                        overlaps.append(cm['iou_top5pct'])  # IoU for top 5%
+                avg_overlap = np.mean(overlaps)
+                avg_diversity = 1 - avg_overlap
+                context['retrieval_diversity_score'] = round(avg_diversity, 4)
+            else:
+                context['retrieval_diversity_score'] = None
+                
         context["retrieval_detailed"] = retrieval_detailed
 
     # Debug prints

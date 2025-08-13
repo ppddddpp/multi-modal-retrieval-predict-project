@@ -179,9 +179,10 @@ You can visualize:
 
 ### Predict & Explain
 ![Predict & Explain](demo/1.png)
+![Predict & Explain](demo/2.png)
 
 ### Retrieval Demo
-![Retrieval Demo](demo/2.png)
+![Retrieval Demo](demo/3.png)
 ---
 
 ## Acknowledgments

@@ -8,6 +8,7 @@ import io
 import base64
 import matplotlib.pyplot as plt
 from PIL import Image
+import torch
 
 def compare_maps(map_a: np.ndarray, map_b: np.ndarray, topk_frac: float = 0.05):
     """
@@ -132,3 +133,45 @@ def heatmap_to_base64_overlay(orig_img: np.ndarray,
     pil.save(buf, format='PNG', optimize=True)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode('ascii')
+
+def compute_gradcam_map_for_target(self, img_global, img_patches, txt_feats, target_class):
+    """
+    Compute Grad-CAM for the target class.
+    This assumes you have a CNN backbone and can get gradients of the last conv features.
+    """
+    self.model.zero_grad()
+
+    # Forward pass with hooks to capture activations and gradients
+    activations = {}
+    gradients = {}
+
+    def forward_hook(module, inp, out):
+        activations['value'] = out
+
+    def backward_hook(module, grad_in, grad_out):
+        gradients['value'] = grad_out[0]
+
+    handle_fwd = self.last_conv_layer.register_forward_hook(forward_hook)
+    handle_bwd = self.last_conv_layer.register_backward_hook(backward_hook)
+
+    # Forward pass
+    outputs = self.model.classifier(img_global, img_patches, txt_feats)
+    score = outputs[:, target_class]
+    score.backward(retain_graph=True)
+
+    # Get weights and compute Grad-CAM
+    grads = gradients['value'].detach()
+    acts = activations['value'].detach()
+    weights = grads.mean(dim=(2, 3), keepdim=True)
+    cam = (weights * acts).sum(dim=1, keepdim=True)
+    cam = torch.relu(cam)
+
+    # Normalize
+    cam = cam.squeeze().cpu().numpy()
+    cam -= cam.min()
+    cam /= cam.max() + 1e-8
+
+    handle_fwd.remove()
+    handle_bwd.remove()
+
+    return cam

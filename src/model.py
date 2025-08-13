@@ -378,5 +378,6 @@ class MultiModalRetrievalModel(nn.Module):
             'retrieval_ids':   retr_ids,
             'retrieval_dists': retr_dists,
             'attention_map':   maps['attention_map'],
-            'ig_maps':         maps['ig_maps']
+            'ig_maps':         maps['ig_maps'],
+            'gradcam_maps':      maps['gradcam_maps']
         }

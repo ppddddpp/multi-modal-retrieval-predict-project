@@ -107,7 +107,7 @@
         {% endif %}
 
         <!-- Visualizations (Query image + overlays) -->
-        {% if img_orig or attn_map_q_b64 or ig_map_q_b64 or hybrid_q_b64 %}
+        {% if img_orig or attn_map_q_b64 or ig_map_q_b64 or hybrid_q_b64 or gradcam_map_q_b64%}
         <div class="card mb-4 p-4">
             <h2 class="card-title mb-3">Visualizations (Query)</h2>
             <div class="row g-3 align-items-start">
@@ -135,7 +135,14 @@
                     <img src="data:image/png;base64,{{ hybrid_q_b64 }}" class="img-fluid rounded shadow-sm" />
                 </div>
                 {% endif %}
+                {% if gradcam_map_q_b64 %}
+                <div class="col-md-6 col-lg-3 text-center">
+                    <h6>Grad-CAM</h6>
+                    <img src="data:image/png;base64,{{ gradcam_map_q_b64 }}" class="img-fluid rounded shadow-sm" />
+                </div>
+                {% endif %}
             </div>
+
 
             {% if explain_metrics %}
             <div class="mt-3">
@@ -156,6 +163,13 @@
         {% if retrieval_detailed %}
         <div class="card mb-4 p-4">
             <h2 class="card-title mb-3">Retrieved Image Details</h2>
+            {% if retrieval_diversity_score is not none %}
+            <div class="alert alert-info">
+                <strong>Diversity score among retrieved attention maps:</strong>
+                {{ retrieval_diversity_score }}
+            </div>
+            {% endif %}
+
             <div class="accordion" id="retrievalAccordion">
                 {% for item in retrieval_detailed %}
                 <div class="accordion-item mb-2">
@@ -172,35 +186,55 @@
                                 <div class="col-md-6">
                                     {% if item.image %}
                                     <h6>Retrieved Image</h6>
-                                    <img src="data:image/png;base64,{{ item.image }}" class="img-fluid mb-2"
-                                        alt="Retrieved" />
+                                    <img src="data:image/png;base64,{{ item.image }}"
+                                        class="img-fluid rounded shadow-sm mb-2" alt="Retrieved" />
                                     {% endif %}
                                 </div>
 
-                                <div class="col-md-6">
-                                    <h6>Overlays (retrieved)</h6>
-                                    <div class="d-flex gap-2 flex-wrap">
+                                <div class="col-12">
+                                    <h6>Image & Overlays (retrieved)</h6>
+                                    <div class="row g-3 align-items-start">
+
+                                        {% if item.image %}
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <h6>Original</h6>
+                                            <img src="data:image/png;base64,{{ item.image }}"
+                                                class="img-fluid rounded shadow-sm" />
+                                        </div>
+                                        {% endif %}
+
                                         {% if item.attn_b64 %}
-                                        <div class="text-center" style="width:140px">
-                                            <small>Attention</small>
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <h6>Attention Map</h6>
                                             <img src="data:image/png;base64,{{ item.attn_b64 }}"
-                                                class="img-fluid rounded" />
+                                                class="img-fluid rounded shadow-sm" />
                                         </div>
                                         {% endif %}
+
                                         {% if item.ig_b64 %}
-                                        <div class="text-center" style="width:140px">
-                                            <small>IG</small>
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <h6>Integrated Gradients</h6>
                                             <img src="data:image/png;base64,{{ item.ig_b64 }}"
-                                                class="img-fluid rounded" />
+                                                class="img-fluid rounded shadow-sm" />
                                         </div>
                                         {% endif %}
+
                                         {% if item.hybrid_b64 %}
-                                        <div class="text-center" style="width:140px">
-                                            <small>Hybrid</small>
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <h6>Hybrid Overlay</h6>
                                             <img src="data:image/png;base64,{{ item.hybrid_b64 }}"
-                                                class="img-fluid rounded" />
+                                                class="img-fluid rounded shadow-sm" />
                                         </div>
                                         {% endif %}
+
+                                        {% if item.gradcam_b64 %}
+                                        <div class="col-md-6 col-lg-3 text-center">
+                                            <h6>Grad-CAM</h6>
+                                            <img src="data:image/png;base64,{{ item.gradcam_b64 }}"
+                                                class="img-fluid rounded shadow-sm" />
+                                        </div>
+                                        {% endif %}
+
                                     </div>
                                 </div>
                             </div>
