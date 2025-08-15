@@ -3,11 +3,11 @@ Data folder should follow:
 data
 ├── openi
 |   ├── dicom/            # all .dcm files
-|   ├── NLMCXR_dcm
-|       ├── 1
-|       ├── ...
-|       ├── 3999
-|       └── NLMCXR_dcm_piiRemoved_1_400.tar.gz
+|       └── NLMCXR_dcm
+|           ├── 1
+|           ├── ...
+|           ├── 3999
+|           └── NLMCXR_dcm_piiRemoved_1_400.tar.gz
 |   └── xml
 |       └── NLMCXR_reports
 |           └── ecgen-radiology
