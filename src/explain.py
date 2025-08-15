@@ -15,7 +15,7 @@ class ExplanationEngine:
     ):
         """
         fusion_model    : image+text fusion backbone
-        classifier_head : final head mapping fused features → logits
+        classifier_head : final head mapping fused features to logits
         image_size      : H x W of output heatmaps
         ig_steps        : n steps for Integrated Gradients
         device          : device to run the explanation on
@@ -220,8 +220,8 @@ class ExplanationEngine:
         Returns:
             dict with three keys:
                 - 'attention_map': (H, W) attention map over image patches
-                - 'ig_maps':       dict of target → (H, W) IG map over image patches
-                - 'gradcam_maps':  dict of target → (H, W) Grad-CAM map over image patches
+                - 'ig_maps':       dict of target to (H, W) IG map over image patches
+                - 'gradcam_maps':  dict of target to (H, W) Grad-CAM map over image patches
         """
         N = attn_weights['txt2img'].shape[-1]
         G = int(N**0.5)

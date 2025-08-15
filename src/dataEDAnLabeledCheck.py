@@ -59,7 +59,7 @@ if __name__ == "__main__":
         for grp, terms in all_groups.items()
     }
 
-    # Build reverse map: term → list of groups it belongs to
+    # Build reverse map: term to list of groups it belongs to
     reverse_map = defaultdict(list)
     for grp, terms in all_groups_lc.items():
         for term in terms:

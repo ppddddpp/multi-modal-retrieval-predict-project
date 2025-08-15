@@ -32,6 +32,6 @@ class RawStatDataset(Dataset):
             return torch.from_numpy(resized).float()
 
         except Exception as e:
-            print(f"[ERROR] Failed at idx={idx} → {rec['dicom_path']}: {e}")
+            print(f"[ERROR] Failed at idx={idx} to {rec['dicom_path']}: {e}")
             return torch.zeros((3, *self.size), dtype=torch.float32)  # fallback
 

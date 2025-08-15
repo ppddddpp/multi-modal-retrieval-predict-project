@@ -138,6 +138,22 @@ def compute_gradcam_map_for_target(self, img_global, img_patches, txt_feats, tar
     """
     Compute Grad-CAM for the target class.
     This assumes you have a CNN backbone and can get gradients of the last conv features.
+
+    Parameters
+    ----------
+    img_global : torch.Tensor
+        The global image features.
+    img_patches : torch.Tensor
+        The image patches.
+    txt_feats : torch.Tensor
+        The text features.
+    target_class : int
+        The target class index.
+
+    Returns
+    -------
+    np.ndarray
+        The Grad-CAM map for the target class.
     """
     self.model.zero_grad()
 

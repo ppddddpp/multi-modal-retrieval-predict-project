@@ -99,8 +99,8 @@ def plot_dicom_debug(dicom_path):
 
 if __name__ == "__main__":
     # Prepare a tokenizer for decoding
-    print("XML DIR   exists:", XML_DIR.exists(), " →", XML_DIR)
-    print("DICOM ROOT exists:", DICOM_ROOT.exists(), " →", DICOM_ROOT)
+    print("XML DIR   exists:", XML_DIR.exists(), " to", XML_DIR)
+    print("DICOM ROOT exists:", DICOM_ROOT.exists(), " to", DICOM_ROOT)
     tokenizer = load_hf_model_or_local("emilyalsentzer/Bio_ClinicalBERT", local_dir=MODEL_PLACE, is_tokenizer=True)
 
     combined_groups = {
@@ -126,7 +126,7 @@ if __name__ == "__main__":
         label_names=label_names
     )
 
-    print(f"→ Found {len(label_counts)} active labels:")
+    print(f"Found {len(label_counts)} active labels:")
     for label, count in label_counts.most_common():
         print(f"  • {label:20s} — {count} cases")
 

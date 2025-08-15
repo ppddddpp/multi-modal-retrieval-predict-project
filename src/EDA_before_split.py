@@ -89,9 +89,9 @@ if __name__ == '__main__':
         report_map[rec['report_text']].append(rec['id'])
 
     shared = [ids for ids in report_map.values() if len(ids) > 1]
-    print(f"→ Unique reports: {len(report_map)}")
-    print(f"→ Reports shared by multiple images: {len(shared)}")
-    print(f"→ Avg images per reused report: {np.mean([len(ids) for ids in shared]):.2f}")
+    print(f"Unique reports: {len(report_map)}")
+    print(f"Reports shared by multiple images: {len(shared)}")
+    print(f"Avg images per reused report: {np.mean([len(ids) for ids in shared]):.2f}")
 
     # Debug a sample DICOM
     dp = DICOMImagePreprocessor()

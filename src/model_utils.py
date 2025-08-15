@@ -37,7 +37,7 @@ def load_hf_model_or_local(
         return loader(str(local_dir), **kwargs)
     except (OSError, ValueError):
         # Fall through to download if local load fails
-        print(f"[Download] {model_name} → will save to {local_dir}")
+        print(f"[Download] {model_name} to will save to {local_dir}")
 
     # Download from HF hub and save
     local_dir.mkdir(parents=True, exist_ok=True)

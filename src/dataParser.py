@@ -52,7 +52,7 @@ for group, kws in combined_groups.items():
         keyword_to_group[kw.lower()] = group
 
 # ----------------------------
-# Build a keyword → disease_group map
+# Build a keyword to disease_group map
 # ----------------------------
 keyword_to_group = {
     kw.lower(): group
