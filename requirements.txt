@@ -1,0 +1,23 @@
+# Specify Python version used for development Python 3.11.8
+# This is a recommendation, as pip does not enforce Python versions from requirements.txt directly.
+# For stricter environment control, consider tools like conda or pyenv.
+
+numpy==2.3.1
+torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121 # For CUDA 12.1 compatibility
+transformers==4.53.2
+tensorDICOM==3.0.1
+matplotlib==3.10.3
+timm==1.0.17
+opencv-python==4.12.0.88
+tqdm==4.67.1
+scikit-learn==1.7.0
+python-dotenv==0.9
+wandb==0.21.0
+pandas==2.3.1
+Flask==2.2.5
+spacy==3.8.7
+# SpaCy models are typically downloaded separately after spacy is installed:
+# python -m spacy download en_core_sci_sm
+# python -m spacy download en_core_web_sm
+google-genai==1.5.0
+negspacy==1.0.4
