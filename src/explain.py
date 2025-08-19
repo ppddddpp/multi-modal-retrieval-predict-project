@@ -38,11 +38,12 @@ class ExplanationEngine:
         up     = F.interpolate(grid, size=self.image_size, mode='bilinear', align_corners=False)
         return self.upscale_heatmap(up.squeeze().detach().numpy(), target_size=self.image_size)   # (H,W)
 
-    def _forward_patches_batchfirst(self, img_patches, txt_feats, target_idx):
+    def _forward_patches_batchfirst(self, img_patches, txt_feats, target_idx=None):
         """
         img_patches : (B, Np, E) or (B, G1, G2, E)
         txt_feats   : (B, T, E)
-        Returns logits for the requested target index (shape: (B,1))
+        If target_idx is None -> return logits (B, num_classes)
+        If target_idx is int -> return logits[:, target_idx].unsqueeze(-1) (B,1)
         """
         # Flatten if 4D -> (B, G1*G2, E)
         if img_patches.dim() == 4:
@@ -51,14 +52,13 @@ class ExplanationEngine:
         elif img_patches.dim() != 3:
             raise ValueError(f"img_patches must be 3D or 4D, got {tuple(img_patches.shape)}")
 
-        # keep batch-first and contiguous
         img_patches = img_patches.contiguous()
         txt_feats = txt_feats.contiguous()
 
         # create img_global as mean over patches (same as training)
         img_global = img_patches.mean(dim=1)   # (B, E)
 
-        # Call fusion layer — it returns (fused, attn_dict) or (fused, None)
+        # Call fusion layer — it returns (fused, attn_dict) or fused tensor
         fusion_out = self.fusion_model(
             img_global = img_global,
             img_patch  = img_patches,
@@ -66,69 +66,90 @@ class ExplanationEngine:
             return_attention = False
         )
 
-        # normalize handling: fusion_out can be tuple (fused, attn) or a single tensor
-        if isinstance(fusion_out, tuple) or isinstance(fusion_out, list):
+        if isinstance(fusion_out, (tuple, list)):
             fused = fusion_out[0]
         else:
             fused = fusion_out
 
-        # fused should be (B, joint_dim); now run classifier_head to get logits (B, num_classes)
-        logits = self.classifier_head(fused)
+        logits = self.classifier_head(fused)  # (B, num_classes)
 
-        # return logits for the requested class index
-        return logits[:, target_idx].unsqueeze(-1)
+        if target_idx is None:
+            return logits
+        else:
+            return logits[:, int(target_idx)].unsqueeze(-1)
 
-    def compute_gradcam_map_for_target(
-        self,
-        img_global: torch.Tensor,
-        img_patches: torch.Tensor,
-        txt_feats: torch.Tensor,
-        target_idx: int
-    ) -> np.ndarray:
+    def compute_gradcam_map_for_target(self,
+                                    img_global: torch.Tensor,
+                                    img_patches: torch.Tensor,
+                                    txt_feats: torch.Tensor,
+                                    target_idx: int) -> np.ndarray:
         """
-        Patch-based Grad-CAM approximation using already-extracted embeddings.
-        Works with (B, Np, E) patches and (B, E) global image features.
+        Embedding-based Grad-CAM for patch embeddings.
+        - img_patches: (B, Np, E) or (B, G, G, E)
+        - Returns: HxW numpy heatmap for the first item in batch normalized to [0,1]
         """
-        # Enable grads on patches
-        img_patches = img_patches.clone().detach().to(self.device).requires_grad_(True)
-        img_global  = img_global.clone().detach().to(self.device).requires_grad_(False)
-        txt_feats   = txt_feats.clone().detach().to(self.device)
+        # Move to device and ensure patches require grad
+        device = getattr(self, "device", img_patches.device)
+        img_patches = img_patches.clone().detach().to(device).requires_grad_(True)  # (B,Np,E)
+        txt_feats   = txt_feats.clone().detach().to(device)
+        img_global  = img_global.clone().detach().to(device)
 
-        # Forward pass through fusion + classifier
         fused_out = self.fusion_model(
-            img_global=img_global,
-            img_patch=img_patches,
-            txt_feats=txt_feats,
-            return_attention=False
+            img_global = img_patches.mean(dim=1),
+            img_patch  = img_patches,
+            txt_feats  = txt_feats,
+            return_attention = False
         )
         if isinstance(fused_out, (tuple, list)):
             fused_out = fused_out[0]
-
         logits = self.classifier_head(fused_out)  # (B, num_classes)
-        target_logit = logits[:, target_idx]
 
-        # Backward pass to get gradients w.r.t. patches
-        self.fusion_model.zero_grad()
-        self.classifier_head.zero_grad()
-        target_logit.backward(retain_graph=True)
+        # Pick target score scalar: sum across batch to get a single scalar
+        if logits.dim() == 2 and logits.size(1) == 1:
+            target_score = logits.squeeze().sum()
+        else:
+            target_score = logits[:, int(target_idx)].sum()
 
-        grads = img_patches.grad  # (B, Np, E)
-        # Grad-CAM weights: average gradient over embedding dim
-        weights = grads.mean(dim=-1, keepdim=True)  # (B, Np, 1)
+        # compute gradients w.r.t. patches ONLY (no param grads)
+        grads = torch.autograd.grad(
+            outputs=target_score,
+            inputs=img_patches,
+            retain_graph=True,
+            create_graph=False,
+            allow_unused=True
+        )[0]  # (B, Np, E) or None
 
-        # Weighted sum of activations (dot product along embedding dim)
-        cam = (img_patches * weights).sum(dim=-1)  # (B, Np)
+        if grads is None:
+            raise RuntimeError("Gradients wrt img_patches are None. Ensure forward path depends on img_patches.")
 
-        # Reshape to (B, G, G)
-        G = int(cam.shape[1] ** 0.5)
-        cam = cam.view(-1, G, G)
+        # Channel-weighted sum analogous to Grad-CAM: elementwise product then sum over embedding dim
+        cam = (grads * img_patches).sum(dim=-1)  # (B, Np)
 
-        # Normalize to [0,1]
-        cam = cam - cam.min()
-        cam = cam / (cam.max() + 1e-8)
+        # Keep positive contributions only (ReLU)
+        cam = torch.relu(cam)  # (B, Np)
 
-        cam_up = self.upscale_heatmap(cam[0].detach().cpu().numpy(), target_size=self.image_size)
-        return cam_up
+        # Reshape into grid
+        B, Np = cam.shape
+        G = int(np.sqrt(Np))
+        if G * G == Np:
+            cam_grid = cam.view(B, G, G)  # (B, G, G)
+        else:
+            # fallback: treat as 1 x Np and later upsample (keeps spatial ordering if non-square)
+            cam_grid = cam.view(B, 1, Np)
+
+        # Upsample to image size (self.image_size should be (H,W) tuple)
+        target_size = getattr(self, "image_size", (224, 224))
+        cam_grid = cam_grid.unsqueeze(1)  # (B,1,G,G) or (B,1,1,Np)
+        cam_up = F.interpolate(cam_grid, size=target_size, mode="bilinear", align_corners=False)  # (B,1,H,W)
+        cam_up = cam_up.squeeze(1)  # (B,H,W)
+
+        # Normalize per-sample to [0,1]
+        cam_np = cam_up.detach().cpu().numpy()
+        out_map = cam_np[0]  # take first sample
+        eps = 1e-8
+        out_map = (out_map - out_map.min()) / (out_map.max() - out_map.min() + eps)
+        out_map = np.nan_to_num(out_map, nan=0.0, posinf=1.0, neginf=0.0)
+        return out_map
 
     def compute_ig_map_for_target(self, img_global, img_patches, txt_feats, target_idx, steps=50, internal_batch_size=1):
         """
@@ -223,9 +244,25 @@ class ExplanationEngine:
                 - 'ig_maps':       dict of target to (H, W) IG map over image patches
                 - 'gradcam_maps':  dict of target to (H, W) Grad-CAM map over image patches
         """
-        N = attn_weights['txt2img'].shape[-1]
-        G = int(N**0.5)
-        attention_map = self.compute_attention_map(attn_weights['txt2img'], grid_size=G)
+        attention_maps = {}
+
+        for key in ["txt2img", "img2txt", "comb"]:
+            att = attn_weights.get(key, None)
+            if att is None:
+                continue
+
+            # att shape (B, heads, N) or (B, 1, N) to average heads if needed
+            if att.dim() == 3:
+                att = att.mean(dim=1, keepdim=True)
+
+            N = att.shape[-1]
+            G = int(N**0.5)
+
+            if G * G != N:
+                print(f"[WARN] skipping {key}: attention length {N} not square")
+                continue
+
+            attention_maps[key] = self.compute_attention_map(att, grid_size=G)
 
         # IG maps (handle single or list of targets)
         if isinstance(targets, int):
@@ -240,6 +277,7 @@ class ExplanationEngine:
                 t
             )
 
+        # Grad-CAM maps
         gradcam_maps = {}
         for t in targets:
             gradcam_maps[t] = self.compute_gradcam_map_for_target(
@@ -250,7 +288,7 @@ class ExplanationEngine:
             )
 
         return {
-            "attention_map": attention_map,
+            "attention_map": attention_maps,
             "ig_maps": ig_maps,
             "gradcam_maps": gradcam_maps
         }

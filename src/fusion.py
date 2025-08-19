@@ -122,7 +122,7 @@ class CrossModalFusion(nn.Module):
     """
     Cross-modal fusion module.
     """
-    def __init__(self, img_dim, txt_dim, joint_dim=256, num_heads=4):
+    def __init__(self, img_dim, txt_dim, joint_dim=256, num_heads=4, use_cls_only=False):
         """
         Constructor for CrossModalFusion.
 
@@ -131,6 +131,7 @@ class CrossModalFusion(nn.Module):
             txt_dim (int): Dimensionality of the text features.
             joint_dim (int, optional): Dimensionality of the joint embedding. Defaults to 256.
             num_heads (int, optional): Number of attention heads. Defaults to 4.
+            use_cls_only (bool, optional): Whether to use only the CLS token. Defaults to False.
         """
         super().__init__()
         # —— Self-attention for text and image features ——
@@ -172,6 +173,8 @@ class CrossModalFusion(nn.Module):
             nn.Linear(joint_dim // 2, joint_dim)
         )
 
+        self.use_cls_only = use_cls_only
+
     def forward(self, img_global, img_patch, txt_feats, return_attention=False):
         """
         Compute the cross-modal fusion of the input image and text features.
@@ -190,23 +193,26 @@ class CrossModalFusion(nn.Module):
         # img_patch:  (B, N_patches, img_dim)
         # txt_feats:  (B, txt_dim)
         txt_feats = self.txt_self_attn(txt_feats)
-        txt_feats_pooled = txt_feats[:, 0]
+        if self.use_cls_only:
+            txt_feats_pooled = txt_feats[:, 0].unsqueeze(1)  # (B, 1, D)
+        else:
+            txt_feats_pooled = txt_feats                     # (B, L, D)
         img_global = self.img_global_self_attn(img_global.unsqueeze(1)).squeeze(1)
         img_patch = self.img_patch_self_attn(img_patch)
 
         B, N, D = img_patch.shape
 
         # Text attends to image patches
-        Q_txt = self.query_txt(txt_feats_pooled).unsqueeze(1)      # (B, 1, joint_dim)
-        K_img = self.key_img(img_patch)                     # (B, N, joint_dim)
-        V_img = self.value_img(img_patch)                   # (B, N, joint_dim)
+        Q_txt = self.query_txt(txt_feats_pooled)                   # (B, L or 1, D)
+        K_img = self.key_img(img_patch)                            # (B, N, D)
+        V_img = self.value_img(img_patch)                          # (B, N, D)
         att_txt2img, attn_weights_txt2img = self.attn_txt2img(Q_txt, K_img, V_img)
-        att_txt2img = att_txt2img.squeeze(1)                # (B, joint_dim)
+        att_txt2img = att_txt2img.mean(dim=1)                      # (B, D) ← pool across tokens if L > 1
 
         # Image patches attend to text
-        Q_img = self.query_img(img_patch)                   # (B, N, joint_dim)
-        K_txt = self.key_txt(txt_feats_pooled).unsqueeze(1)        # (B, 1, joint_dim)
-        V_txt = self.value_txt(txt_feats_pooled).unsqueeze(1)      # (B, 1, joint_dim)
+        Q_img = self.query_img(img_patch)                   # (B, N, D)
+        K_txt = self.key_txt(txt_feats_pooled)              # (B, L or 1, D)
+        V_txt = self.value_txt(txt_feats_pooled)            # (B, L or 1, D)
         att_img2txt, attn_weights_img2txt = self.attn_img2txt(Q_img, K_txt, V_txt)
 
         # Pool fused patches to get updated patch image vector

@@ -261,6 +261,10 @@ class MultiModalRetrievalModel(nn.Module):
             fused = fused.unsqueeze(1)
             fused = self.pos_encoder(fused)  # Add positional encoding
             fused, _ = self.self_attn(fused, fused, fused)
+            fused, self_attn_weights = self.self_attn(fused, fused, fused)
+            if return_attention:
+                attn_weights[f"layer_{i}_comb"] = self_attn_weights
+
             fused = fused.squeeze(1)
 
             # First layer does not have residual connection
@@ -361,10 +365,13 @@ class MultiModalRetrievalModel(nn.Module):
         )
 
         # Extract attention maps
-        layer_key = f"layer_{len(self.fusion_layers) - 1}_txt2img"
+        last_idx = len(self.fusion_layers) - 1
         attn_weights_expl = {
-            'txt2img': attn_weights[layer_key]
+            "txt2img": attn_weights.get(f"layer_{last_idx}_txt2img"),
+            "img2txt": attn_weights.get(f"layer_{last_idx}_img2txt"),
+            "comb":    attn_weights.get(f"layer_{last_idx}_comb", None)
         }
+        print("IG targets:", targets)
 
         maps = self.explainer.explain(
             img_global=img_global,
@@ -377,6 +384,71 @@ class MultiModalRetrievalModel(nn.Module):
         return {
             'retrieval_ids':   retr_ids,
             'retrieval_dists': retr_dists,
+            'attention_map':   maps['attention_map'],
+            'ig_maps':         maps['ig_maps'],
+            'gradcam_maps':      maps['gradcam_maps']
+        }
+    
+    def get_explain_score(
+        self,
+        image: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        targets: list,
+    ) -> dict:
+        """
+        Computes explanation maps for a single input using three methods.
+
+        Args:
+            image: torch.Tensor of shape (B, 3, H, W)
+            input_ids: torch.Tensor of shape (B, T)
+            attention_mask: torch.Tensor of shape (B, T)
+            targets: single int or list of ints for the class indices to explain
+
+        Returns:
+            dict with three keys:
+                - 'attention_map': (H, W) attention map over image patches
+                - 'ig_maps':       dict of target to (H, W) IG map over image patches
+                - 'gradcam_maps':  dict of target to (H, W) Grad-CAM map over image patches
+        """
+        # Lazy-init explainer
+        if self.explainer is None:
+            self.explainer = ExplanationEngine(
+                fusion_model=self.fusion_layers[-1],
+                classifier_head=self.classifier,
+                image_size=self.image_size,
+                ig_steps=self.ig_steps,
+                device=self.device
+            )
+
+        _, _, attn_weights = self.forward(
+            image, input_ids, attention_mask, return_attention=True
+        )
+
+        # Extract features for heatmap methods
+        (img_global, img_patches), txt_feats = self.backbones(
+            image.to(self.device),
+            input_ids.to(self.device),
+            attention_mask.to(self.device)
+        )
+
+        # Extract attention maps
+        last_idx = len(self.fusion_layers) - 1
+        attn_weights_expl = {
+            "txt2img": attn_weights.get(f"layer_{last_idx}_txt2img"),
+            "img2txt": attn_weights.get(f"layer_{last_idx}_img2txt"),
+            "comb":    attn_weights.get(f"layer_{last_idx}_comb", None)
+        }
+
+        maps = self.explainer.explain(
+            img_global=img_global,
+            img_patches=img_patches,
+            txt_feats=txt_feats,
+            attn_weights=attn_weights_expl,
+            targets=targets
+        )
+
+        return {
             'attention_map':   maps['attention_map'],
             'ig_maps':         maps['ig_maps'],
             'gradcam_maps':      maps['gradcam_maps']
