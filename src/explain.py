@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from captum.attr import IntegratedGradients
 from typing import Union, List, Dict
 import numpy as np
+import math
 
 class ExplanationEngine:
     def __init__(
@@ -212,6 +213,80 @@ class ExplanationEngine:
         ig_up = self.upscale_heatmap(att[0].detach().cpu().numpy(), target_size=self.image_size)
         return ig_up
 
+    def _attn_to_patch_tensor(self, att, img_patches, method="mean"):
+        """
+        Convert attention weights of arbitrary (B, *, *) shape into a torch tensor shaped (B,1,Np)
+        where Np = number of image patches (img_patches.shape[1]).
+        Returns None if it cannot reliably infer a per-patch map.
+        """
+        if att is None:
+            return None
+
+        # convert to torch tensor on same device as img_patches for shape checking
+        if not torch.is_tensor(att):
+            try:
+                att = torch.as_tensor(att, device=img_patches.device)
+            except Exception:
+                att = torch.tensor(att, device=img_patches.device)
+
+        # If heads dimension present (B, heads, Lq, Lk) -> average heads
+        if att.dim() == 4:
+            # assume shape (B, heads, Lq, Lk)
+            att = att.mean(dim=1)  # -> (B, Lq, Lk)
+
+        # now expect (B, Lq, Lk) or (Lq, Lk) or (B, L)
+        if att.dim() == 3:
+            B, Lq, Lk = att.shape
+            Np = img_patches.shape[1]
+
+            # Case: txt2img typical -> (B, 1, Np)
+            if Lk == Np and Lq == 1:
+                return att[:, 0:1, :].detach()
+
+            # Case: img2txt when keys pooled -> (B, Np, 1)
+            if Lq == Np and Lk == 1:
+                return att[:, :, 0:1].transpose(1, 2).detach()  # (B,1,Np)
+
+            # Case: img2txt when keys are tokens -> (B, Np, L_tokens)
+            if Lq == Np and Lk > 1:
+                if method == "mean":
+                    per_patch = att.mean(dim=-1)  # (B, Np)
+                elif method == "max":
+                    per_patch = att.max(dim=-1)[0]
+                else:
+                    per_patch = att.mean(dim=-1)
+                return per_patch.unsqueeze(1).detach()  # (B,1,Np)
+
+            # Case: tokens->patches -> (B, L_tokens, Np)
+            if Lk == Np and Lq > 1:
+                per_patch = att.mean(dim=1)  # average queries -> (B, Np)
+                return per_patch.unsqueeze(1).detach()
+
+            # ambiguous: try aggregating over keys to yield (B, Lq) and see if Lq == Np
+            agg_key = att.mean(dim=-1)  # (B, Lq)
+            if agg_key.shape[1] == Np:
+                return agg_key.unsqueeze(1).detach()
+
+            # try averaging over queries -> (B, Lk)
+            agg_q = att.mean(dim=1)
+            if agg_q.shape[1] == Np:
+                return agg_q.unsqueeze(1).detach()
+
+            # give up -> return None
+            return None
+
+        # att.dim() == 2 -> maybe (B, Np) or (Np,) etc.
+        if att.dim() == 2:
+            if att.shape[1] == img_patches.shape[1]:
+                return att.unsqueeze(1).detach()
+            # maybe shape (Np, ) or (1, Np)
+            if att.shape[0] == img_patches.shape[1]:
+                return att.unsqueeze(0).unsqueeze(1).detach()
+            return None
+
+        # other dims -> cannot handle
+        return None
+
     def upscale_heatmap(self, heatmap, target_size=None):
         if target_size is None:
             target_size = self.image_size
@@ -251,18 +326,28 @@ class ExplanationEngine:
             if att is None:
                 continue
 
-            # att shape (B, heads, N) or (B, 1, N) to average heads if needed
-            if att.dim() == 3:
-                att = att.mean(dim=1, keepdim=True)
-
-            N = att.shape[-1]
-            G = int(N**0.5)
-
-            if G * G != N:
-                print(f"[WARN] skipping {key}: attention length {N} not square")
+            # Convert arbitrary att tensor into (B,1,Np) if possible
+            att_patch_tensor = self._attn_to_patch_tensor(att, img_patches, method="mean")
+            if att_patch_tensor is None:
+                # debug: show shape and skip
+                try:
+                    shape_info = tuple(att.shape)
+                except Exception:
+                    shape_info = "unknown"
+                print(f"[WARN] skipping {key}: could not convert attention to per-patch vector (att shape {shape_info})")
                 continue
 
-            attention_maps[key] = self.compute_attention_map(att, grid_size=G)
+            # get number of patches
+            N = att_patch_tensor.shape[-1]
+            G = int(math.sqrt(N))
+
+            if G * G != N:
+                # still not square -> skip
+                print(f"[WARN] skipping {key}: attention length {N} not square (n_patches)")
+                continue
+
+            # att_patch_tensor is (B,1,Np) -> pass to compute_attention_map
+            attention_maps[key] = self.compute_attention_map(att_patch_tensor, grid_size=G)
 
         # IG maps (handle single or list of targets)
         if isinstance(targets, int):

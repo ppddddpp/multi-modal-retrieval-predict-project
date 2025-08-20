@@ -1,11 +1,9 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from fusion import CrossModalFusion, Backbones
 from retrieval import RetrievalEngine, make_retrieval_engine
 from pathlib import Path
 from explain import ExplanationEngine
-import os
 import numpy as np
 import json
 
@@ -22,7 +20,6 @@ class MultiHeadMLP(nn.Module):
         self.linear2 = nn.Linear(dim * 2, dim)
 
     def forward(self, x):
-        B, D = x.size()
         x = self.linear1(x)
         x = self.act(x)
         x = self.linear2(x)
@@ -73,7 +70,8 @@ class MultiModalRetrievalModel(nn.Module):
         checkpoint_path:str = None,
         device:         torch.device = torch.device("cpu"),
         training:      bool = False,
-        use_shared_ffn=True,
+        use_shared_ffn: bool = True,
+        use_cls_only: bool = False,
         retriever: RetrievalEngine = None
     ):
         """
@@ -91,6 +89,7 @@ class MultiModalRetrievalModel(nn.Module):
         :param checkpoint_path: path to a model checkpoint to load
         :param device: device to run the model on
         :param training: whether the model is being trained or used for inference
+        :param use_cls_only: whether to use only the CLS token for BERT
         :param retriever: optional retrieval engine for case-based retrieval
 
         Args:
@@ -108,6 +107,7 @@ class MultiModalRetrievalModel(nn.Module):
             checkpoint_path (str, optional): path to a model checkpoint to load. Defaults to None.
             device (torch.device, optional): device to run the model on. Defaults to torch.device("cpu").
             training (bool, optional): whether the model is being trained or used for inference. Defaults to False.
+            use_cls_only (bool, optional): whether to use only the CLS token for BERT. Defaults to False.
             retriever (RetrievalEngine, optional): optional retrieval engine for case-based retrieval. Defaults to None.
         """
         super().__init__()
@@ -181,6 +181,8 @@ class MultiModalRetrievalModel(nn.Module):
             nn.Dropout(0.1)
         ).to(device)
 
+        self.use_cls_only = use_cls_only
+
         #  Retrieval engine (offline index of embeddings)
         if not training:
             if checkpoint_path:
@@ -231,16 +233,18 @@ class MultiModalRetrievalModel(nn.Module):
         self.retriever = retriever
 
     def forward(self, image, input_ids, attention_mask, return_attention=False):
+        # extracting separate features
         """
         Inputs:
-          pixel_values  (B, 1, H, W) or (B, 3, H, W)
-          input_ids     (B, L)
-          attention_mask(B, L)
+          image (torch.Tensor): (B, 3, H, W)
+          input_ids (torch.Tensor): (B, L)
+          attention_mask (torch.Tensor): (B, L)
+
         Returns:
-          joint_emb (B, joint_dim)
-          logits    (B, num_classes)
+          joint_emb (torch.Tensor): (B, joint_dim)
+          logits (torch.Tensor): (B, num_classes)
+          dict: A dictionary containing the attention weights if return_attention is True.
         """
-        # extracting separate features
         (img_global, img_patches), txt_feats = self.backbones(
             image.to(self.device),
             input_ids.to(self.device),
@@ -257,15 +261,21 @@ class MultiModalRetrievalModel(nn.Module):
                 txt_feats,
                 return_attention=return_attention
             )
-            fused = self.dropout(fused)
-            fused = fused.unsqueeze(1)
-            fused = self.pos_encoder(fused)  # Add positional encoding
-            fused, _ = self.self_attn(fused, fused, fused)
-            fused, self_attn_weights = self.self_attn(fused, fused, fused)
-            if return_attention:
-                attn_weights[f"layer_{i}_comb"] = self_attn_weights
-
-            fused = fused.squeeze(1)
+            if self.use_cls_only:
+                fused = self.dropout(fused)
+                fused = fused.unsqueeze(1)
+                fused = self.pos_encoder(fused)  # Add positional encoding
+                fused, _ = self.self_attn(fused, fused, fused)
+                fused, self_attn_weights = self.self_attn(fused, fused, fused)
+                if return_attention:
+                    attn_weights[f"layer_{i}_comb"] = self_attn_weights
+            else:
+                fused = self.dropout(fused)
+                fused = self.pos_encoder(fused)  # Add positional encoding
+                fused, _ = self.self_attn(fused, fused, fused)
+                fused, self_attn_weights = self.self_attn(fused, fused, fused)
+                if return_attention:
+                    attn_weights[f"layer_{i}_comb"] = self_attn_weights
 
             # First layer does not have residual connection
             if i == 0:
@@ -279,7 +289,7 @@ class MultiModalRetrievalModel(nn.Module):
             if self.use_shared_ffn:
                 x = x + self.shared_ffn(x_ffn)
             else:
-                x = x + self.ffn[i](x_ffn)
+                x = x + self.ffn[i](x_ffn)             
             x = x + self.adapters[i](x)
 
             # Update joint_emb
