@@ -60,6 +60,7 @@ num_heads = cfg.num_heads                     # number of attention heads in the
 num_fusion_layers= cfg.num_fusion_layers
 use_shared_ffn = cfg.use_shared_ffn
 text_dim = cfg.text_dim
+use_cls_only = cfg.use_cls_only
 
 # --- Wandb ---
 project_name = cfg.project_name
@@ -271,6 +272,7 @@ if __name__ == '__main__':
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
         device=device,
         use_shared_ffn=cfg.use_shared_ffn,
+        use_cls_only=cfg.use_cls_only,
         training=True
     ).to(device)
 

@@ -61,6 +61,7 @@ def main(k=10):
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
         checkpoint_path=str(CKPT_PATH),
         use_shared_ffn=cfg.use_shared_ffn,
+        use_cls_only=cfg.use_cls_only,
         device=device,
         training=True
     ).to(device)

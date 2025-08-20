@@ -20,6 +20,7 @@ class Config:
     num_heads: int = 32
     num_fusion_layers: int = 3
     use_shared_ffn: bool = True
+    use_cls_only: bool = False
     project_name: str = "multi-modal-retrieval-predict"
     # this will be auto‑generated
     run_name: str = field(init=False)
@@ -49,6 +50,7 @@ class Config:
             f"_gamma={self.gamma_focal}"
             f"_fusion_layers={self.num_fusion_layers}"
             f"_shared_ffn={self.use_shared_ffn}"
+            f"_cls_only={self.use_cls_only}"
         )
 
     @staticmethod
@@ -83,5 +85,6 @@ class Config:
         data["project_name"] = str(data.get("project_name", "multi-modal-retrieval-predict"))
         data["num_fusion_layers"] = int(data.get("num_fusion_layers", 3))
         data["use_shared_ffn"] = bool(data.get("use_shared_ffn", True))
+        data["use_cls_only"] = bool(data.get("use_cls_only", False))
 
         return Config(**data)

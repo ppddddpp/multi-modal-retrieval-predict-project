@@ -74,6 +74,7 @@ def main():
         checkpoint_path=str(CKPT_PATH),
         device=device,
         use_shared_ffn=cfg.use_shared_ffn,
+        use_cls_only=cfg.use_cls_only,
         training=False
     ).to(device)
 

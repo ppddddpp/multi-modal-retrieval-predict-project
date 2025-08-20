@@ -127,7 +127,7 @@ class MultiModalRetrievalModel(nn.Module):
         # set up fusion
         if fusion_type == "cross":
             self.fusion_layers = nn.ModuleList([
-                CrossModalFusion(img_dim, txt_dim, joint_dim, num_heads).to(device)
+                CrossModalFusion(img_dim, txt_dim, joint_dim, num_heads, use_cls_only).to(device)
                 for _ in range(num_fusion_layers)
             ])
         else:

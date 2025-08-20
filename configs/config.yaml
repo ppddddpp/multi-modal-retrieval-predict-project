@@ -15,4 +15,5 @@ cls_weight: 1.5
 cont_weight: 0.3
 num_heads: 8
 use_shared_ffn: false
+use_cls_only: false
 project_name: "multimodal-disease-classification-2807"
