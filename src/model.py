@@ -264,18 +264,14 @@ class MultiModalRetrievalModel(nn.Module):
             if self.use_cls_only:
                 fused = self.dropout(fused)
                 fused = fused.unsqueeze(1)
-                fused = self.pos_encoder(fused)  # Add positional encoding
-                fused, _ = self.self_attn(fused, fused, fused)
-                fused, self_attn_weights = self.self_attn(fused, fused, fused)
-                if return_attention:
-                    attn_weights[f"layer_{i}_comb"] = self_attn_weights
             else:
                 fused = self.dropout(fused)
-                fused = self.pos_encoder(fused)  # Add positional encoding
-                fused, _ = self.self_attn(fused, fused, fused)
-                fused, self_attn_weights = self.self_attn(fused, fused, fused)
-                if return_attention:
-                    attn_weights[f"layer_{i}_comb"] = self_attn_weights
+
+            fused = self.pos_encoder(fused)  # Add positional encoding
+            fused, _ = self.self_attn(fused, fused, fused)
+            fused, self_attn_weights = self.self_attn(fused, fused, fused)
+            if return_attention:
+                attn_weights[f"layer_{i}_comb"] = self_attn_weights
 
             # First layer does not have residual connection
             if i == 0:
@@ -300,6 +296,14 @@ class MultiModalRetrievalModel(nn.Module):
                 attn_weights[f"layer_{i}_txt2img"] = attn["txt2img"]
                 attn_weights[f"layer_{i}_img2txt"] = attn["img2txt"]
     
+        if joint_emb.dim() == 3:
+            # If singleton seq dim (B, 1, D) -> squeeze; otherwise pool across tokens.
+            if joint_emb.size(1) == 1:
+                joint_emb = joint_emb.squeeze(1)           # -> (B, D)
+            else:
+                # mean pooling across sequence axis
+                joint_emb = joint_emb.mean(dim=1)
+
         logits = self.classifier(joint_emb)
 
         return joint_emb, logits, attn_weights if return_attention else None
