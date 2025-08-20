@@ -287,6 +287,29 @@ def save_b64_map(
     img.save(out_path, format="PNG", optimize=True)
     return str(out_path)
 
+def attention_to_html(tokens, scores):
+    """
+    Convert attention scores to HTML visualization.
+
+    Parameters
+    ----------
+    tokens : list[str]
+        Tokens to visualize.
+    scores : np.ndarray
+        Attention scores for each token.
+
+    Returns
+    -------
+    str
+        HTML visualization of attention scores.
+    """
+    scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-6)
+    spans = []
+    for tok, s in zip(tokens, scores):
+        color = f"rgba(255,0,0,{s:.2f})"  # red with alpha = score
+        spans.append(f"<span style='background-color:{color}'>{tok}</span>")
+    return " ".join(spans)
+
 def make_attention_maps(
     model,
     fusion_layer,                 # the fusion module (callable) that supports return_attention=True
@@ -497,4 +520,4 @@ def make_attention_maps(
         return out
 
 __all__ = ("find_dicom_file", "load_report_lookup_via_parser", "retriever",
-           "model", "preproc", "tokenizer", "report_lookup", "make_attention_maps")
+           "model", "preproc", "tokenizer", "report_lookup", "make_attention_maps", "attention_to_html")

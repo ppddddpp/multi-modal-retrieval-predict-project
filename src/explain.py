@@ -27,17 +27,46 @@ class ExplanationEngine:
         self.ig_steps        = ig_steps
         self.device = device
 
-    def compute_attention_map(
-        self,
-        attn_tensor: torch.Tensor,
-        grid_size: int
-    ) -> np.ndarray:
-        # attn_tensor: (B,1,N_patches) or (1,1,N_patches)
-        scores = attn_tensor[0].squeeze().cpu()                  # (N,)
+    def avg_heads(self, att):
+        if att is None:
+            return None
+        att = torch.as_tensor(att) if not torch.is_tensor(att) else att
+        if att.dim() == 4:  # (B, H, Lq, Lk)
+            return att.mean(dim=1)  # (B, Lq, Lk)
+        return att
+
+    def compute_attention_map(self, attn_tensor: torch.Tensor, grid_size: int) -> np.ndarray:
+        # accept torch/numpy and various shapes, unify to (B,1,Np)
+        if attn_tensor is None:
+            return None
+        if not torch.is_tensor(attn_tensor):
+            attn_tensor = torch.as_tensor(attn_tensor)
+        # unify shapes
+        if attn_tensor.dim() == 1:
+            attn_tensor = attn_tensor.unsqueeze(0).unsqueeze(0)
+        elif attn_tensor.dim() == 2:
+            # assume (B, Np) or (1, Np)
+            attn_tensor = attn_tensor.unsqueeze(1)
+        elif attn_tensor.dim() == 3:
+            # assume (B,1,Np) or (B,Np,1) -> try to coerce
+            if attn_tensor.shape[1] != 1 and attn_tensor.shape[2] == 1:
+                attn_tensor = attn_tensor.transpose(1, 2)
+        else:
+            # unexpected dims -> try to reduce
+            attn_tensor = attn_tensor.reshape(attn_tensor.shape[0], 1, -1)
+
+        scores = attn_tensor[0].squeeze().cpu()
         scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
-        grid   = scores.view(1,1,grid_size,grid_size)           # (1,1,G,G)
-        up     = F.interpolate(grid, size=self.image_size, mode='bilinear', align_corners=False)
-        return self.upscale_heatmap(up.squeeze().detach().numpy(), target_size=self.image_size)   # (H,W)
+        grid = scores.view(1, 1, grid_size, grid_size)
+        up = F.interpolate(grid, size=self.image_size, mode='bilinear', align_corners=False)
+        return self.upscale_heatmap(up.squeeze().detach().numpy(), target_size=self.image_size)
+
+    def upscale_heatmap(self, heatmap, target_size=None):
+        if target_size is None:
+            target_size = self.image_size
+        t = torch.tensor(heatmap, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        t_up = F.interpolate(t, size=target_size, mode='bilinear', align_corners=False)
+        return t_up.squeeze().numpy()
 
     def _forward_patches_batchfirst(self, img_patches, txt_feats, target_idx=None):
         """
@@ -158,9 +187,8 @@ class ExplanationEngine:
         - img_patches: (B, Np, E)  or (B, G, G, E)
         - txt_feats:   (B, T, E)
         """
-        # Ensure inputs are on the right device and have proper grad settings
         img_patches = img_patches.clone().detach().to(self.device).requires_grad_(True)
-        txt_feats   = txt_feats.clone().detach().to(self.device)  # text is fixed, no grads
+        txt_feats   = txt_feats.clone().detach().to(self.device)
 
         # Use IntegratedGradients with a forward that accepts only the image patches
         ig = IntegratedGradients(lambda ip: self._forward_patches_batchfirst(ip, txt_feats, target_idx))
@@ -286,13 +314,176 @@ class ExplanationEngine:
 
         # other dims -> cannot handle
         return None
+    
+    def _attn_to_token_tensor(self, att, txt_feats, method="mean"):
+        """
+        Fallback: reduce attention matrix to token-level importance scores.
 
-    def upscale_heatmap(self, heatmap, target_size=None):
-        if target_size is None:
-            target_size = self.image_size
-        t = torch.tensor(heatmap, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-        t_up = F.interpolate(t, size=target_size, mode="bilinear", align_corners=False)
-        return t_up.squeeze().numpy()
+        Args:
+            att (torch.Tensor): raw attention [B, H, T, T] or [B, T, T].
+            txt_feats (torch.Tensor): text features [B, T, D].
+            method (str): "mean" (default) or "max".
+
+        Returns:
+            torch.Tensor: reduced token-level vector [B, 1, T], normalized to [0,1].
+        """
+        if att is None:
+            return None
+
+        # ensure [B, H, T, T]
+        if att.dim() == 3:
+            att = att.unsqueeze(1)
+
+        B, H, T, _ = att.shape
+
+        # reduce across heads
+        if method == "mean":
+            v = att.mean(dim=1)   # [B, T, T]
+        elif method == "max":
+            v = att.max(dim=1)[0] # [B, T, T]
+        else:
+            raise ValueError(f"Unknown reduction method: {method}")
+
+        # collapse context dimension → get a single score per token
+        v = v.mean(dim=-1, keepdim=True).transpose(1, 2)  # [B, 1, T]
+
+        # normalize to [0,1]
+        v = (v - v.min(dim=-1, keepdim=True)[0]) / (v.max(dim=-1, keepdim=True)[0] - v.min(dim=-1, keepdim=True)[0] + 1e-8)
+
+        return v
+    
+    def _comb_helper(self, att, other, target_len, min_mass_ratio=0.12, swap=False):
+        if att is None:
+            return None
+        att = self.avg_heads(att)
+        if att is None or att.dim() != 3:
+            return None
+        B, Lq, Lk = att.shape
+        N = int(target_len)
+        if Lk == N:
+            return att.mean(dim=1).unsqueeze(1).detach()
+        if Lq == N:
+            return att.mean(dim=-1).unsqueeze(1).detach()
+
+        if not swap:
+            primary_len = Lk
+            sums = att.sum(dim=1)  # (B, Lk)
+        else:
+            primary_len = Lq
+            sums = att.sum(dim=-1)  # (B, Lq)
+
+        if primary_len < N:
+            return None
+
+        cumsum = torch.cumsum(sums, dim=-1)
+        per_sample = []
+        for b in range(B):
+            row = cumsum[b]
+            if primary_len == N:
+                wins = row[-1].unsqueeze(0)
+            else:
+                end = row[N-1:]
+                start = torch.cat((torch.tensor([0.0], device=row.device), row[:-N]))
+                wins = end - start
+            max_val, max_idx = torch.max(wins, dim=0)
+            total = (sums[b].sum() + 1e-12)
+            if (max_val / total) < min_mass_ratio:
+                per_sample.append(torch.zeros(N, device=att.device))
+                continue
+            off = int(max_idx.item())
+            if not swap:
+                slice_block = att[b:b+1, :, off:off+N]
+                per_vec = slice_block.mean(dim=1).squeeze(0)
+            else:
+                slice_block = att[b:b+1, off:off+N, :]
+                per_vec = slice_block.mean(dim=-1).squeeze(0)
+            per_sample.append(per_vec)
+        out = torch.stack(per_sample, dim=0)
+        return out.unsqueeze(1).detach()
+
+    def comb_attention_to_patch_vector(self, att, img_patches, min_mass_ratio=0.12):
+        return self._comb_helper(att, img_patches, target_len=img_patches.shape[1], min_mass_ratio=min_mass_ratio, swap=False)
+
+    def comb_attention_to_token_vector(self, att, txt_feats, min_mass_ratio=0.12):
+        return self._comb_helper(att, txt_feats, target_len=txt_feats.shape[1], min_mass_ratio=min_mass_ratio, swap=True)
+
+    def txt2img_to_patch_vector(self, att_txt2img, img_patches, reduction="mean"):
+        att = self.avg_heads(att_txt2img)
+        if att is None:
+            return None
+        if att.dim() != 3:
+            return None
+        if reduction == "mean":
+            per_patch = att.mean(dim=1)
+        else:
+            per_patch = att.mean(dim=1)
+        return per_patch.unsqueeze(1).detach()
+
+    def img2txt_to_token_vector(self, att_img2txt, txt_feats, reduction="mean"):
+        att = self.avg_heads(att_img2txt)
+        if att is None:
+            return None
+        if att.dim() != 3:
+            return None
+        if reduction == "mean":
+            per_token = att.mean(dim=1)
+        else:
+            per_token = att.mean(dim=1)
+        return per_token.unsqueeze(1).detach()
+    
+    def _comb_helper(self, att, other, target_len, min_mass_ratio=0.12, swap=False):
+        """
+        Generic sliding-window helper. If swap==False: slide over keys for patches.
+        If swap==True: extract token block by swapping Lq/Lk roles.
+        """
+        if att is None:
+            return None
+        att = self.avg_heads(att)
+        if att is None or att.dim() != 3:
+            return None
+        B, Lq, Lk = att.shape
+        N = int(target_len)
+        # quick exact matches
+        if Lk == N:
+            return att.mean(dim=1).unsqueeze(1).detach()   # (B,1,N)
+        if Lq == N:
+            return att.mean(dim=-1).unsqueeze(1).detach()
+        # choose primary axis to slide
+        if not swap:
+            primary_len = Lk
+            sums = att.sum(dim=1)  # (B, Lk)
+        else:
+            primary_len = Lq
+            sums = att.sum(dim=-1)  # (B, Lq)
+
+        if primary_len < N:
+            return None
+
+        cumsum = torch.cumsum(sums, dim=-1)
+        per_sample = []
+        for b in range(B):
+            row = cumsum[b]
+            if primary_len == N:
+                wins = row[-1].unsqueeze(0)
+            else:
+                end = row[N-1:]
+                start = torch.cat((torch.tensor([0.0], device=row.device), row[:-N]))
+                wins = end - start
+            max_val, max_idx = torch.max(wins, dim=0)
+            total = (sums[b].sum() + 1e-12)
+            if (max_val / total) < min_mass_ratio:
+                per_sample.append(torch.zeros(N, device=att.device))
+                continue
+            off = int(max_idx.item())
+            if not swap:
+                slice_block = att[b:b+1, :, off:off+N]   # (1, Lq, N)
+                per_vec = slice_block.mean(dim=1).squeeze(0)  # (N,)
+            else:
+                slice_block = att[b:b+1, off:off+N, :]   # (1, N, Lk)
+                per_vec = slice_block.mean(dim=-1).squeeze(0)
+            per_sample.append(per_vec)
+        out = torch.stack(per_sample, dim=0)  # (B, N)
+        return out.unsqueeze(1).detach()      # (B,1,N)
 
     def explain(
         self,
@@ -321,33 +512,94 @@ class ExplanationEngine:
         """
         attention_maps = {}
 
-        for key in ["txt2img", "img2txt", "comb"]:
-            att = attn_weights.get(key, None)
-            if att is None:
-                continue
+        # txt2img -> per-patch
+        att_txt2img = attn_weights.get("txt2img", None)
+        p_from_txt = None
+        if att_txt2img is not None:
+            p_from_txt = self.txt2img_to_patch_vector(att_txt2img, img_patches)
+            if p_from_txt is not None:
+                N = p_from_txt.shape[-1]
+                G = int(math.sqrt(N)) if int(math.sqrt(N)) ** 2 == N else None
+                if G is None:
+                    print(f"[WARN] txt2img skip: {N} not square")
+                else:
+                    attention_maps["txt2img"] = self.compute_attention_map(p_from_txt, grid_size=G)
 
-            # Convert arbitrary att tensor into (B,1,Np) if possible
-            att_patch_tensor = self._attn_to_patch_tensor(att, img_patches, method="mean")
-            if att_patch_tensor is None:
-                # debug: show shape and skip
-                try:
-                    shape_info = tuple(att.shape)
-                except Exception:
-                    shape_info = "unknown"
-                print(f"[WARN] skipping {key}: could not convert attention to per-patch vector (att shape {shape_info})")
-                continue
+        # img2txt -> per-token
+        att_img2txt = attn_weights.get("img2txt", None)
+        t_from_img = None
+        if att_img2txt is not None:
+            t_from_img = self.img2txt_to_token_vector(att_img2txt, txt_feats)
+            if t_from_img is not None:
+                attention_maps["img2txt"] = t_from_img[0, 0].cpu().numpy()
 
-            # get number of patches
-            N = att_patch_tensor.shape[-1]
-            G = int(math.sqrt(N))
+        # comb -> try both patch and token extraction (heuristic)
+        att_comb = attn_weights.get("comb", None)
+        p_from_comb = None
+        t_from_comb = None
 
-            if G * G != N:
-                # still not square -> skip
-                print(f"[WARN] skipping {key}: attention length {N} not square (n_patches)")
-                continue
+        if att_comb is not None:
+            # Try extracting patch-level attention
+            p_from_comb = self.comb_attention_to_patch_vector(att_comb, img_patches, min_mass_ratio=0.12)
+            if p_from_comb is None:
+                p_from_comb = self._attn_to_patch_tensor(att_comb, img_patches, method="mean")
 
-            # att_patch_tensor is (B,1,Np) -> pass to compute_attention_map
-            attention_maps[key] = self.compute_attention_map(att_patch_tensor, grid_size=G)
+            if p_from_comb is not None:
+                N = p_from_comb.shape[-1]
+                G = int(math.sqrt(N)) if int(math.sqrt(N)) ** 2 == N else None
+                if G is None:
+                    print(f"[WARN] comb->img skip: {N} not square")
+                else:
+                    attention_maps["comb_img"] = self.compute_attention_map(p_from_comb, grid_size=G)
+
+            # Try extracting token-level attention
+            t_from_comb = self.comb_attention_to_token_vector(att_comb, txt_feats, min_mass_ratio=0.0)
+            if t_from_comb is None:
+                t_from_comb = self._attn_to_token_tensor(att_comb, txt_feats, method="mean")
+
+            if t_from_comb is not None:
+                attention_maps["comb_txt"] = t_from_comb[0, 0].detach().cpu().numpy()
+
+        # Combine to final maps (weighted)
+        final_patch = None
+        if p_from_txt is not None and p_from_comb is not None:
+            final_patch = 0.6 * p_from_txt + 0.4 * p_from_comb
+        elif p_from_txt is not None:
+            final_patch = p_from_txt
+        elif p_from_comb is not None:
+            final_patch = p_from_comb
+
+        final_token = None
+        if t_from_img is not None and t_from_comb is not None:
+            final_token = 0.6 * t_from_img + 0.4 * t_from_comb
+        elif t_from_img is not None:
+            final_token = t_from_img
+        elif t_from_comb is not None:
+            final_token = t_from_comb
+
+        def _norm_and_to_numpy(x):
+            if x is None:
+                return None
+            y = x.clone()
+            mi = y.view(y.size(0), -1).min(dim=1)[0].view(-1, 1, 1)
+            ma = y.view(y.size(0), -1).max(dim=1)[0].view(-1, 1, 1)
+            y = (y - mi) / (ma - mi + 1e-8)
+            return y
+
+        final_patch = _norm_and_to_numpy(final_patch)
+        final_token = _norm_and_to_numpy(final_token)
+
+        if final_patch is not None:
+            N = final_patch.shape[-1]
+            G = int(math.sqrt(N)) if int(math.sqrt(N)) ** 2 == N else None
+            if G is not None:
+                attention_maps["final_patch_map"] = self.compute_attention_map(final_patch, grid_size=G)
+            else:
+                attention_maps["final_patch_map"] = None
+        else:
+            attention_maps["final_patch_map"] = None
+
+        attention_maps["final_token_map"] = final_token[0, 0].cpu().numpy() if final_token is not None else None
 
         # IG maps (handle single or list of targets)
         if isinstance(targets, int):

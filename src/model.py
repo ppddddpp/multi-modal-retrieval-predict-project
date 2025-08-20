@@ -40,13 +40,22 @@ class StochasticDepth(nn.Module):
         return x + residual * binary_mask / keep_prob
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, dim, max_len=500):
+    def __init__(self, dim, max_len=512):
         super().__init__()
+        self.dim = dim
+        self.max_len = max_len
         self.pe = nn.Parameter(torch.zeros(1, max_len, dim))
         nn.init.normal_(self.pe, std=0.02)
 
     def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
+        L = x.size(1)
+        if L > self.max_len:
+            # extend PE on the fly
+            extra = torch.zeros(1, L - self.max_len, self.dim, device=x.device)
+            nn.init.normal_(extra, std=0.02)
+            pe = torch.cat([self.pe, extra], dim=1)
+            return x + pe[:, :L]
+        return x + self.pe[:, :L]
 
 class MultiModalRetrievalModel(nn.Module):
     """
@@ -145,7 +154,7 @@ class MultiModalRetrievalModel(nn.Module):
 
         self.alpha = nn.Parameter(torch.ones(1)) # learnable scaling factor for residual connections
         self.dropout = nn.Dropout(0.1)
-        self.pos_encoder = PositionalEncoding(joint_dim)
+        self.pos_encoder = PositionalEncoding(joint_dim, txt_dim)
 
         # Feed-forward network for each fusion layer
         if self.use_shared_ffn:
@@ -385,7 +394,6 @@ class MultiModalRetrievalModel(nn.Module):
             "img2txt": attn_weights.get(f"layer_{last_idx}_img2txt"),
             "comb":    attn_weights.get(f"layer_{last_idx}_comb", None)
         }
-        print("IG targets:", targets)
 
         maps = self.explainer.explain(
             img_global=img_global,

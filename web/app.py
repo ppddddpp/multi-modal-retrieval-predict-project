@@ -22,7 +22,7 @@ from model import MultiModalRetrievalModel
 from labeledData import disease_groups, normal_groups
 from dataParser import parse_openi_xml
 from retrieval import make_retrieval_engine
-from helper import compare_maps, heatmap_to_base64_overlay
+from helper import compare_maps, heatmap_to_base64_overlay, attention_to_html
 plt.ioff()
 
 # ── Project directories ────────────────────────────────────────────────────────
@@ -186,10 +186,12 @@ def index():
 
         # Get explaining outputs
         att_maps_q = out.get("attention_map", {}) or {}
-        if not all(k in att_maps_q for k in ("img2txt", "txt2img", "comb")):
-            raise RuntimeError("Attention maps not found in output")
+        valid_keys = ["txt2img", "img2txt", "comb_img", "comb_txt", "final_patch_map", "final_token_map"]
+        
+        if not any(k in att_maps_q and att_maps_q[k] is not None for k in valid_keys):
+            raise RuntimeError("No usable attention maps found in output")
         else:
-            print("Attention maps found")
+            print("Attention maps found:", [k for k in valid_keys if k in att_maps_q])
 
         # IG maps (target-based: class indices)
         ig_maps_q = out.get("ig_maps", {}) or {}
@@ -243,9 +245,16 @@ def index():
 
         if att_maps_q is not None:
             try:
-                context['attn_txt_q_b64']  = heatmap_to_base64_overlay(orig_arr, att_maps_q.get("txt2img"), alpha=0.45) if att_maps_q.get("txt2img") is not None else None
-                context['attn_img_q_b64']  = heatmap_to_base64_overlay(orig_arr, att_maps_q.get("img2txt"), alpha=0.45) if att_maps_q.get("img2txt") is not None else None
-                context['attn_comb_q_b64'] = heatmap_to_base64_overlay(orig_arr, att_maps_q.get("comb"), alpha=0.45) if att_maps_q.get("comb") is not None else None
+                # --- Attention overlays ---
+                context['attn_txt2img_b64']   = heatmap_to_base64_overlay(orig_arr, att_maps_q.get("txt2img"), alpha=0.45)
+                context['attn_comb_img_b64']  = heatmap_to_base64_overlay(orig_arr, att_maps_q.get("comb_img"), alpha=0.45)
+                context['attn_final_img_b64'] = heatmap_to_base64_overlay(orig_arr, att_maps_q.get("final_patch_map"), alpha=0.45)
+
+                # --- Attention highlights (text) ---
+                tokens_decoded = tokenizer.convert_ids_to_tokens(txt_ids[0])
+                context['attn_img2txt_html']  = attention_to_html(tokens_decoded, att_maps_q.get("img2txt")) if att_maps_q.get("img2txt") is not None else None
+                context['attn_comb_txt_html'] = attention_to_html(tokens_decoded, att_maps_q.get("comb_txt")) if att_maps_q.get("comb_txt") is not None else None
+                context['attn_final_txt_html']= attention_to_html(tokens_decoded, att_maps_q.get("final_token_map")) if att_maps_q.get("final_token_map") is not None else None
             except Exception as e:
                 print(f"[WARN] query attention overlay failed: {e}")
 
@@ -264,9 +273,10 @@ def index():
                 print(f"[WARN] query Grad-CAM overlay failed: {e}")
 
         # compute quick numeric comparisons for the query's own att vs ig
+        image_attn_keys = ["txt2img", "comb_img", "final_patch_map"]
         context['attn_ig_metrics'] = {}
         if main_target is not None and main_target in ig_maps_q:
-            for key in ["txt2img", "img2txt", "comb"]:
+            for key in image_attn_keys:
                 if att_maps_q.get(key) is not None:
                     try:
                         cm5  = compare_maps(att_maps_q[key], ig_maps_q[main_target], topk_frac=0.05)
@@ -282,7 +292,7 @@ def index():
 
         context['gc_attn_metrics'] = {}
         if main_target is not None and main_target in gradcam_maps_q:
-            for key in ["txt2img", "img2txt", "comb"]:
+            for key in image_attn_keys:
                 if att_maps_q.get(key) is not None:
                     try:
                         cm5  = compare_maps(att_maps_q[key], gradcam_maps_q[main_target], topk_frac=0.05)
@@ -352,25 +362,47 @@ def index():
                     except Exception as e:
                         print(f"[WARN] failed to compute explanations for retrieved {rid}: {e}")
 
-                    # create base64 overlays
-                    attn_txt_b64_r, attn_img_b64_r, attn_cmb_b64_r, ig_b64_r, gradcam_b64_r= None, None, None, None, None
-                    if att_maps_r.get("txt2img") is not None:
-                        try:
-                            attn_txt_b64_r = heatmap_to_base64_overlay(orig_arr_r, att_maps_r["txt2img"], alpha=0.45)
-                        except Exception as e:
-                            print(f"[WARN] render retrieved attn overlay {rid} failed: {e}")
 
-                    if att_maps_r.get("img2txt") is not None:
-                        try:
-                            attn_img_b64_r = heatmap_to_base64_overlay(orig_arr_r, att_maps_r["img2txt"], alpha=0.45)
-                        except Exception as e:
-                            print(f"[WARN] render retrieved attn overlay {rid} failed: {e}")
+                    # create base64 overlays for retrieved item
+                    attn_txt2img_b64_r, attn_comb_img_b64_r, attn_final_img_b64_r = None, None, None
+                    attn_img2txt_html_r, attn_comb_txt_html_r, attn_final_txt_html_r = None, None, None
+                    ig_b64_r, gradcam_b64_r = None, None
+                    ig_map_r, gradcam_map_r = None, None
 
-                    if att_maps_r.get("comb") is not None:
-                        try:
-                            attn_cmb_b64_r = heatmap_to_base64_overlay(orig_arr_r, att_maps_r["comb"], alpha=0.45)
-                        except Exception as e:
-                            print(f"[WARN] render retrieved attn overlay {rid} failed: {e}")
+                    try:
+                        if att_maps_r.get("txt2img") is not None:
+                            attn_txt2img_b64_r = heatmap_to_base64_overlay(orig_arr_r, att_maps_r["txt2img"], alpha=0.45)
+
+                        if att_maps_r.get("comb_img") is not None:
+                            attn_comb_img_b64_r = heatmap_to_base64_overlay(orig_arr_r, att_maps_r["comb_img"], alpha=0.45)
+
+                        if att_maps_r.get("final_patch_map") is not None:
+                            attn_final_img_b64_r = heatmap_to_base64_overlay(orig_arr_r, att_maps_r["final_patch_map"], alpha=0.45)
+
+                        # Text highlights (HTML rendering)
+                        tokens_r = tokenizer(
+                            report_text,
+                            return_tensors="pt",
+                            padding="max_length",
+                            truncation=True,
+                            max_length=cfg.text_dim
+                        )
+                        tokens_decoded_r = tokenizer.convert_ids_to_tokens(tokens_r.input_ids[0])
+
+                        if att_maps_r.get("img2txt") is not None:
+                            attn_img2txt_html_r = attention_to_html(tokens_decoded_r, att_maps_r["img2txt"])
+
+                        if att_maps_r.get("comb_txt") is not None:
+                            attn_comb_txt_html_r = attention_to_html(tokens_decoded_r, att_maps_r["comb_txt"])
+
+                        if att_maps_r.get("final_token_map") is not None:
+                            attn_final_txt_html_r = attention_to_html(tokens_decoded_r, att_maps_r["final_token_map"])
+
+                    except Exception as e:
+                        print(f"[WARN] render retrieved attention failed for {rid}: {e}")
+
+                    if att_maps_r.get("final_patch_map") is not None:
+                        retrieved_att_maps.append(att_maps_r["final_patch_map"])
 
                     if main_target is not None and ig_maps_r.get(main_target) is not None:
                         try:
@@ -389,34 +421,37 @@ def index():
                     # compute cross-image comparisons (query vs retrieved)-
                     cross_metrics = {}
                     try:
-                        # Attention maps (txt2img, img2txt, comb)
-                        for att_type in ["txt2img", "img2txt", "comb"]:
+                        # --- Attention maps ---
+                        for att_type in ["txt2img", "comb_img", "final_patch_map"]:
                             if att_maps_q.get(att_type) is not None and att_maps_r.get(att_type) is not None:
-                                cm_5 = compare_maps(att_maps_q[att_type], att_maps_r[att_type], topk_frac=0.05)
+                                cm_5  = compare_maps(att_maps_q[att_type], att_maps_r[att_type], topk_frac=0.05)
                                 cm_20 = compare_maps(att_maps_q[att_type], att_maps_r[att_type], topk_frac=0.20)
 
-                                cross_metrics[f"att_{att_type}_pearson_top5pct"]   = round(cm_5.get("pearson", 0.0), 4)
-                                cross_metrics[f"att_{att_type}_spearman_top5pct"]  = round(cm_5.get("spearman", 0.0), 4)
-                                cross_metrics[f"att_{att_type}_iou_top5pct"]       = round(cm_5.get("iou_top5pct", 0.0), 4)
-                                cross_metrics[f"att_{att_type}_iou_top20pct"]      = round(cm_20.get("iou_top20pct", 0.0), 4)
+                                cross_metrics[f"att_{att_type}_pearson_top5pct"]  = round(cm_5.get("pearson", 0.0), 4)
+                                cross_metrics[f"att_{att_type}_spearman_top5pct"] = round(cm_5.get("spearman", 0.0), 4)
+                                cross_metrics[f"att_{att_type}_iou_top5pct"]      = round(cm_5.get("iou_top5pct", 0.0), 4)
+                                cross_metrics[f"att_{att_type}_iou_top20pct"]     = round(cm_20.get("iou_top20pct", 0.0), 4)
 
-                        # Integrated Gradients (per target)
+                        # --- Integrated Gradients (per target) ---
                         if main_target is not None and main_target in ig_maps_q and ig_map_r is not None:
-                            cm_ig_5 = compare_maps(ig_maps_q[main_target], ig_map_r, topk_frac=0.05)
+                            cm_ig_5  = compare_maps(ig_maps_q[main_target], ig_map_r, topk_frac=0.05)
                             cm_ig_20 = compare_maps(ig_maps_q[main_target], ig_map_r, topk_frac=0.20)
-                            cross_metrics["ig_pearson_top5pct"]   = round(cm_ig_5.get("pearson", 0.0), 4)
-                            cross_metrics["ig_spearman_top5pct"]  = round(cm_ig_5.get("spearman", 0.0), 4)
-                            cross_metrics["ig_iou_top5pct"]       = round(cm_ig_5.get("iou_top5pct", 0.0), 4)
-                            cross_metrics["ig_iou_top20pct"]      = round(cm_ig_20.get("iou_top20pct", 0.0), 4)
+                            cross_metrics["ig_pearson_top5pct"]  = round(cm_ig_5.get("pearson", 0.0), 4)
+                            cross_metrics["ig_spearman_top5pct"] = round(cm_ig_5.get("spearman", 0.0), 4)
+                            cross_metrics["ig_iou_top5pct"]      = round(cm_ig_5.get("iou_top5pct", 0.0), 4)
+                            cross_metrics["ig_iou_top20pct"]     = round(cm_ig_20.get("iou_top20pct", 0.0), 4)
 
-                        # Grad-CAM (per target)
+                        # --- Grad-CAM (per target) ---
                         if main_target is not None and main_target in gradcam_maps_q and gradcam_map_r is not None:
-                            cm_gc_5 = compare_maps(gradcam_maps_q[main_target], gradcam_map_r, topk_frac=0.05)
+                            cm_gc_5  = compare_maps(gradcam_maps_q[main_target], gradcam_map_r, topk_frac=0.05)
                             cm_gc_20 = compare_maps(gradcam_maps_q[main_target], gradcam_map_r, topk_frac=0.20)
-                            cross_metrics["gradcam_pearson_top5pct"]   = round(cm_gc_5.get("pearson", 0.0), 4)
-                            cross_metrics["gradcam_spearman_top5pct"]  = round(cm_gc_5.get("spearman", 0.0), 4)
-                            cross_metrics["gradcam_iou_top5pct"]       = round(cm_gc_5.get("iou_top5pct", 0.0), 4)
-                            cross_metrics["gradcam_iou_top20pct"]      = round(cm_gc_20.get("iou_top20pct", 0.0), 4)
+                            cross_metrics["gradcam_pearson_top5pct"]  = round(cm_gc_5.get("pearson", 0.0), 4)
+                            cross_metrics["gradcam_spearman_top5pct"] = round(cm_gc_5.get("spearman", 0.0), 4)
+                            cross_metrics["gradcam_iou_top5pct"]      = round(cm_gc_5.get("iou_top5pct", 0.0), 4)
+                            cross_metrics["gradcam_iou_top20pct"]     = round(cm_gc_20.get("iou_top20pct", 0.0), 4)
+
+                    except Exception as e:
+                        print(f"[WARN] cross-compare failed for {rid}: {e}")
 
                     except Exception as e:
                         print(f"[WARN] cross-compare failed for {rid}: {e}")
@@ -427,11 +462,14 @@ def index():
                         "labels": label_names,
                         "report": report_text,
                         "image": img_b64,
-                        "attn_txt_b64_r": attn_txt_b64_r,
-                        "attn_img_b64_r": attn_img_b64_r,
-                        "attn_cmb_b64_r": attn_cmb_b64_r,
+                        "attn_txt2img_b64_r": attn_txt2img_b64_r,
+                        "attn_comb_img_b64_r": attn_comb_img_b64_r,
+                        "attn_final_img_b64_r": attn_final_img_b64_r,
+                        "attn_img2txt_html_r": attn_img2txt_html_r,
+                        "attn_comb_txt_html_r": attn_comb_txt_html_r,
+                        "attn_final_txt_html_r": attn_final_txt_html_r,
                         "ig_b64": ig_b64_r,
-                        "gradcam_b64": gradcam_b64_r, 
+                        "gradcam_b64": gradcam_b64_r,
                         "cross_metrics": cross_metrics
                     })
 

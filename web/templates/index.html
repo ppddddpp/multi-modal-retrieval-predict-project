@@ -106,35 +106,39 @@
         </div>
         {% endif %}
 
-        <!-- Visualizations (Query image + overlays) -->
-        {% if img_orig or attn_map_q_b64 or ig_map_q_b64 or gradcam_map_q_b64%}
+        <!-- Query Visualizations -->
+        {% if img_orig or attn_txt2img_b64 or ig_map_q_b64 or gradcam_map_q_b64 or attn_img2txt_html or
+        attn_comb_txt_html or
+        attn_final_txt_html %}
         <div class="card mb-4 p-4">
             <h2 class="card-title mb-3">Visualizations (Query)</h2>
             <div class="row g-3 align-items-start">
+
                 {% if show_image and img_orig %}
                 <div class="col-md-6 col-lg-3 text-center">
                     <h6>Original</h6>
                     <img src="data:image/png;base64,{{ img_orig }}" class="img-fluid rounded shadow-sm" />
                 </div>
                 {% endif %}
-                {% if attn_txt_q_b64 %}
+
+                {% if attn_txt2img_b64 %}
                 <div class="col-md-6 col-lg-3 text-center">
                     <h6>Attention (Text→Image)</h6>
-                    <img src="data:image/png;base64,{{ attn_txt_q_b64 }}" class="img-fluid rounded shadow-sm" />
+                    <img src="data:image/png;base64,{{ attn_txt2img_b64 }}" class="img-fluid rounded shadow-sm" />
                 </div>
                 {% endif %}
 
-                {% if attn_img_q_b64 %}
+                {% if attn_comb_img_b64 %}
                 <div class="col-md-6 col-lg-3 text-center">
-                    <h6>Attention (Image→Text)</h6>
-                    <img src="data:image/png;base64,{{ attn_img_q_b64 }}" class="img-fluid rounded shadow-sm" />
+                    <h6>Attention (Combined Image)</h6>
+                    <img src="data:image/png;base64,{{ attn_comb_img_b64 }}" class="img-fluid rounded shadow-sm" />
                 </div>
                 {% endif %}
 
-                {% if attn_comb_q_b64 %}
+                {% if attn_final_img_b64 %}
                 <div class="col-md-6 col-lg-3 text-center">
-                    <h6>Attention (Combined)</h6>
-                    <img src="data:image/png;base64,{{ attn_comb_q_b64 }}" class="img-fluid rounded shadow-sm" />
+                    <h6>Final Attention (Image)</h6>
+                    <img src="data:image/png;base64,{{ attn_final_img_b64 }}" class="img-fluid rounded shadow-sm" />
                 </div>
                 {% endif %}
 
@@ -153,26 +157,44 @@
                 {% endif %}
             </div>
 
-
-            {% if explain_metrics %}
+            <!-- Text attentions -->
+            {% if attn_img2txt_html %}
             <div class="mt-3">
-                <h6>Explain Metrics (query)</h6>
-                <div class="row">
-                    <div class="col-sm-3"><strong>Pearson:</strong> {{ explain_metrics.pearson }}</div>
-                    <div class="col-sm-3"><strong>Spearman:</strong> {{ explain_metrics.spearman }}</div>
-                    <div class="col-sm-3"><strong>IoU top-5%:</strong> {{ explain_metrics.iou_top5pct }}</div>
-                    <div class="col-sm-3"><strong>IoU top-20%:</strong> {{ explain_metrics.iou_top20pct }}</div>
+                <h6>Attention (Image→Text)</h6>
+                <div class="p-2 border rounded bg-light text-dark"
+                    style="max-height:200px; overflow-y:auto; white-space:pre-wrap;">
+                    {{ attn_img2txt_html|safe }}
                 </div>
-                <div class="mt-2"><small>Explain runtime (s): {{ explain_metrics.predict_time_s }}</small></div>
+            </div>
+            {% endif %}
+
+            {% if attn_comb_txt_html %}
+            <div class="mt-3">
+                <h6>Attention (Combined Text)</h6>
+                <div class="p-2 border rounded bg-light text-dark"
+                    style="max-height:200px; overflow-y:auto; white-space:pre-wrap;">
+                    {{ attn_comb_txt_html|safe }}
+                </div>
+            </div>
+            {% endif %}
+
+            {% if attn_final_txt_html %}
+            <div class="mt-3">
+                <h6>Final Token-Level Attention</h6>
+                <div class="p-2 border rounded bg-light text-dark"
+                    style="max-height:200px; overflow-y:auto; white-space:pre-wrap;">
+                    {{ attn_final_txt_html|safe }}
+                </div>
             </div>
             {% endif %}
         </div>
         {% endif %}
 
-        <!-- Retrieved Image Details Accordion -->
+        <!-- Retrieved Image Details -->
         {% if retrieval_detailed %}
         <div class="card mb-4 p-4">
             <h2 class="card-title mb-3">Retrieved Image Details</h2>
+
             {% if retrieval_diversity_score is not none %}
             <div class="alert alert-info">
                 <strong>Diversity score among retrieved attention maps:</strong>
@@ -192,81 +214,81 @@
                     <div id="collapse{{ loop.index }}" class="accordion-collapse collapse"
                         data-bs-parent="#retrievalAccordion">
                         <div class="accordion-body">
-                            <div class="row">
-                                <div class="col-md-6">
-                                    {% if item.image %}
-                                    <h6>Retrieved Image</h6>
+
+                            <div class="row g-3">
+                                {% if item.image %}
+                                <div class="col-md-6 col-lg-3 text-center">
+                                    <h6>Original</h6>
                                     <img src="data:image/png;base64,{{ item.image }}"
-                                        class="img-fluid rounded shadow-sm mb-2" alt="Retrieved" />
-                                    {% endif %}
+                                        class="img-fluid rounded shadow-sm" />
                                 </div>
+                                {% endif %}
 
-                                <div class="col-12">
-                                    <h6>Image & Overlays (retrieved)</h6>
-                                    <div class="row g-3 align-items-start">
-
-                                        {% if item.image %}
-                                        <div class="col-md-6 col-lg-3 text-center">
-                                            <h6>Original</h6>
-                                            <img src="data:image/png;base64,{{ item.image }}"
-                                                class="img-fluid rounded shadow-sm" />
-                                        </div>
-                                        {% endif %}
-
-                                        {% if attn_txt_b64_r %}
-                                        <div class="col-md-6 col-lg-3 text-center">
-                                            <h6>Attention (Text→Image)</h6>
-                                            <img src="data:image/png;base64,{{ attn_txt_b64_r }}"
-                                                class="img-fluid rounded shadow-sm" />
-                                        </div>
-                                        {% endif %}
-
-                                        {% if attn_img_b64_r %}
-                                        <div class="col-md-6 col-lg-3 text-center">
-                                            <h6>Attention (Image→Text)</h6>
-                                            <img src="data:image/png;base64,{{ attn_img_b64_r }}"
-                                                class="img-fluid rounded shadow-sm" />
-                                        </div>
-                                        {% endif %}
-
-                                        {% if attn_comb_b64_r %}
-                                        <div class="col-md-6 col-lg-3 text-center">
-                                            <h6>Attention (Combined)</h6>
-                                            <img src="data:image/png;base64,{{ attn_comb_b64_r }}"
-                                                class="img-fluid rounded shadow-sm" />
-                                        </div>
-                                        {% endif %}
-
-                                        {% if item.ig_b64 %}
-                                        <div class="col-md-6 col-lg-3 text-center">
-                                            <h6>Integrated Gradients</h6>
-                                            <img src="data:image/png;base64,{{ item.ig_b64 }}"
-                                                class="img-fluid rounded shadow-sm" />
-                                        </div>
-                                        {% endif %}
-
-                                        {% if item.hybrid_b64 %}
-                                        <div class="col-md-6 col-lg-3 text-center">
-                                            <h6>Hybrid Overlay</h6>
-                                            <img src="data:image/png;base64,{{ item.hybrid_b64 }}"
-                                                class="img-fluid rounded shadow-sm" />
-                                        </div>
-                                        {% endif %}
-
-                                        {% if item.gradcam_b64 %}
-                                        <div class="col-md-6 col-lg-3 text-center">
-                                            <h6>Grad-CAM</h6>
-                                            <img src="data:image/png;base64,{{ item.gradcam_b64 }}"
-                                                class="img-fluid rounded shadow-sm" />
-                                        </div>
-                                        {% endif %}
-
-                                    </div>
+                                {% if item.attn_txt_b64 %}
+                                <div class="col-md-6 col-lg-3 text-center">
+                                    <h6>Attention (Text→Image)</h6>
+                                    <img src="data:image/png;base64,{{ item.attn_txt_b64 }}"
+                                        class="img-fluid rounded shadow-sm" />
                                 </div>
+                                {% endif %}
+
+                                {% if item.attn_comb_b64 %}
+                                <div class="col-md-6 col-lg-3 text-center">
+                                    <h6>Attention (Combined Image)</h6>
+                                    <img src="data:image/png;base64,{{ item.attn_comb_b64 }}"
+                                        class="img-fluid rounded shadow-sm" />
+                                </div>
+                                {% endif %}
+
+                                {% if item.ig_b64 %}
+                                <div class="col-md-6 col-lg-3 text-center">
+                                    <h6>Integrated Gradients</h6>
+                                    <img src="data:image/png;base64,{{ item.ig_b64 }}"
+                                        class="img-fluid rounded shadow-sm" />
+                                </div>
+                                {% endif %}
+
+                                {% if item.gradcam_b64 %}
+                                <div class="col-md-6 col-lg-3 text-center">
+                                    <h6>Grad-CAM</h6>
+                                    <img src="data:image/png;base64,{{ item.gradcam_b64 }}"
+                                        class="img-fluid rounded shadow-sm" />
+                                </div>
+                                {% endif %}
                             </div>
 
-                            <hr />
+                            <!-- Text attentions -->
+                            {% if item.attn_img_html %}
+                            <div class="mt-3">
+                                <h6>Attention (Image→Text)</h6>
+                                <div class="p-2 border rounded bg-light text-dark"
+                                    style="max-height:200px; overflow-y:auto; white-space:pre-wrap;">
+                                    {{ item.attn_img_html|safe }}
+                                </div>
+                            </div>
+                            {% endif %}
 
+                            {% if item.comb_txt_html %}
+                            <div class="mt-3">
+                                <h6>Attention (Combined Text)</h6>
+                                <div class="p-2 border rounded bg-light text-dark"
+                                    style="max-height:200px; overflow-y:auto; white-space:pre-wrap;">
+                                    {{ item.comb_txt_html|safe }}
+                                </div>
+                            </div>
+                            {% endif %}
+
+                            {% if item.final_token_html %}
+                            <div class="mt-3">
+                                <h6>Final Token-Level Attention</h6>
+                                <div class="p-2 border rounded bg-light text-dark"
+                                    style="max-height:200px; overflow-y:auto; white-space:pre-wrap;">
+                                    {{ item.final_token_html|safe }}
+                                </div>
+                            </div>
+                            {% endif %}
+
+                            <hr />
                             <p><strong>Labels:</strong></p>
                             <ul>
                                 {% for label in item.labels %}
@@ -276,66 +298,6 @@
 
                             <p><strong>Report:</strong></p>
                             <pre style="white-space: pre-wrap;">{{ item.report }}</pre>
-
-                            {% if item.cross_metrics %}
-                            <hr />
-                            <h6>Cross-image comparison (query vs retrieved)</h6>
-
-                            <!-- Summary -->
-                            {% set pearsons = [] %}
-                            {% set ious = [] %}
-
-                            {% for k,v in item.cross_metrics.items() %}
-                            {% if "pearson" in k %}{% set _ = pearsons.append(v) %}{% endif %}
-                            {% if "iou_top5pct" in k %}{% set _ = ious.append(v) %}{% endif %}
-                            {% endfor %}
-
-                            {% if pearsons or ious %}
-                            <div class="alert alert-secondary p-2">
-                                <strong>Summary:</strong><br>
-                                {% if pearsons|length > 0 %}
-                                Avg Pearson: {{ (pearsons | sum / pearsons|length) | round(4) }}<br>
-                                {% endif %}
-                                {% if ious|length > 0 %}
-                                Avg IoU (top-5%): {{ (ious | sum / ious|length) | round(4) }}
-                                {% endif %}
-                            </div>
-                            {% endif %}
-
-                            <!-- Attention -->
-                            {% if item.cross_metrics.att_pearson_top5pct is defined %}
-                            <h6 class="mt-2">Attention</h6>
-                            <ul>
-                                <li>Pearson (top-5%): {{ item.cross_metrics.att_pearson_top5pct }}</li>
-                                <li>Spearman (top-5%): {{ item.cross_metrics.att_spearman_top5pct }}</li>
-                                <li>IoU top-5%: {{ item.cross_metrics.att_iou_top5pct }}</li>
-                                <li>IoU top-20%: {{ item.cross_metrics.att_iou_top20pct }}</li>
-                            </ul>
-                            {% endif %}
-
-                            <!-- Integrated Gradients -->
-                            {% if item.cross_metrics.ig_pearson_top5pct is defined %}
-                            <h6 class="mt-2">Integrated Gradients</h6>
-                            <ul>
-                                <li>Pearson (top-5%): {{ item.cross_metrics.ig_pearson_top5pct }}</li>
-                                <li>Spearman (top-5%): {{ item.cross_metrics.ig_spearman_top5pct }}</li>
-                                <li>IoU top-5%: {{ item.cross_metrics.ig_iou_top5pct }}</li>
-                                <li>IoU top-20%: {{ item.cross_metrics.ig_iou_top20pct }}</li>
-                            </ul>
-                            {% endif %}
-
-                            <!-- Grad-CAM -->
-                            {% if item.cross_metrics.gradcam_pearson_top5pct is defined %}
-                            <h6 class="mt-2">Grad-CAM</h6>
-                            <ul>
-                                <li>Pearson (top-5%): {{ item.cross_metrics.gradcam_pearson_top5pct }}</li>
-                                <li>Spearman (top-5%): {{ item.cross_metrics.gradcam_spearman_top5pct }}</li>
-                                <li>IoU top-5%: {{ item.cross_metrics.gradcam_iou_top5pct }}</li>
-                                <li>IoU top-20%: {{ item.cross_metrics.gradcam_iou_top20pct }}</li>
-                            </ul>
-                            {% endif %}
-                            {% endif %}
-
                         </div>
                     </div>
                 </div>
