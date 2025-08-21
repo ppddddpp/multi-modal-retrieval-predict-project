@@ -126,6 +126,76 @@ model = MultiModalRetrievalModel(
 ).to(device)
 model.eval()
 
+def safe_unpack_topk(topk_any):
+    """Normalize topk returned shapes to a flat python list."""
+    if topk_any is None:
+        return []
+    # if nested lists (B x K) and user passed topk for batch, take first row
+    if isinstance(topk_any, list) and len(topk_any) > 0 and isinstance(topk_any[0], (list, tuple)):
+        return list(topk_any[0])
+    # if numpy array
+    try:
+        return list(np.array(topk_any).tolist())
+    except Exception:
+        return list(topk_any)
+
+def resize_to_match(src: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    """
+    Resize src (H_src x W_src) to match shape of ref (H_ref x W_ref).
+    Returns resized array (float32). Tries cv2, then skimage, then scipy.ndimage.zoom,
+    then a crude numpy repeat fallback.
+    """
+    import numpy as np
+    Ht, Wt = ref.shape
+    Hs, Ws = src.shape
+    if (Hs, Ws) == (Ht, Wt):
+        return src.astype(np.float32)
+
+    src_f = src.astype(np.float32)
+
+    # try cv2
+    try:
+        import cv2
+        # cv2.resize takes (width, height)
+        resized = cv2.resize(src_f, (Wt, Ht), interpolation=cv2.INTER_LINEAR)
+        return resized.astype(np.float32)
+    except Exception:
+        pass
+
+    # try skimage
+    try:
+        from skimage.transform import resize
+        resized = resize(src_f, (Ht, Wt), order=1, preserve_range=True, anti_aliasing=True)
+        return resized.astype(np.float32)
+    except Exception:
+        pass
+
+    # try scipy.ndimage.zoom
+    try:
+        from scipy.ndimage import zoom
+        zh = Ht / float(Hs)
+        zw = Wt / float(Ws)
+        resized = zoom(src_f, (zh, zw), order=1)  # order=1 -> bilinear-like
+        return resized.astype(np.float32)
+    except Exception:
+        pass
+
+    # fallback: crude nearest-repeat
+    try:
+        # compute integer repetition factors (ceil), then crop
+        rh = int(np.ceil(Ht / Hs))
+        rw = int(np.ceil(Wt / Ws))
+        rep = np.repeat(np.repeat(src_f, rh, axis=0), rw, axis=1)
+        resized = rep[:Ht, :Wt].astype(np.float32)
+        return resized
+    except Exception:
+        # last resort: pad or crop
+        out = np.zeros((Ht, Wt), dtype=np.float32)
+        h = min(Hs, Ht)
+        w = min(Ws, Wt)
+        out[:h, :w] = src_f[:h, :w]
+        return out
+
 def compare_maps(map_a: np.ndarray, map_b: np.ndarray, topk_frac: float = 0.05):
     """
     Compute metrics comparing two attention maps.
