@@ -4,6 +4,7 @@ from captum.attr import IntegratedGradients
 from typing import Union, List, Dict
 import numpy as np
 import math
+import warnings
 
 class ExplanationEngine:
     def __init__(
@@ -28,6 +29,12 @@ class ExplanationEngine:
         self.device = device
 
     def avg_heads(self, att):
+        """
+        Given a tensor of arbitrary shape, if it has a `heads` dimension (i.e., it has shape (B, H, Lq, Lk)),
+        average over the `heads` dimension to return a tensor of shape (B, Lq, Lk). Otherwise, return the
+        input tensor as-is.
+        """
+        
         if att is None:
             return None
         att = torch.as_tensor(att) if not torch.is_tensor(att) else att
@@ -37,10 +44,26 @@ class ExplanationEngine:
 
     def compute_attention_map(self, attn_tensor: torch.Tensor, grid_size: int) -> np.ndarray:
         # accept torch/numpy and various shapes, unify to (B,1,Np)
+        """
+        Compute attention map from attention tensor.
+
+        Parameters
+        ----------
+        attn_tensor: torch.Tensor
+            The attention tensor.
+        grid_size: int
+            The size of the output attention map.
+
+        Returns
+        -------
+        np.ndarray
+            The attention map as a numpy array.
+        """
         if attn_tensor is None:
             return None
         if not torch.is_tensor(attn_tensor):
             attn_tensor = torch.as_tensor(attn_tensor)
+        
         # unify shapes
         if attn_tensor.dim() == 1:
             attn_tensor = attn_tensor.unsqueeze(0).unsqueeze(0)
@@ -56,12 +79,33 @@ class ExplanationEngine:
             attn_tensor = attn_tensor.reshape(attn_tensor.shape[0], 1, -1)
 
         scores = attn_tensor[0].squeeze().cpu()
+        # Normalize
         scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+
+        # safety check: expected length == grid_size*grid_size
+        expected = grid_size * grid_size
+        if scores.numel() != expected:
+            # If mismatch, try to resize via interpolation instead of reshaping (fallback)
+            grid = scores.view(1, 1, 1, -1) # (1,1,1,N)
+            up_t = F.interpolate(grid, size=self.image_size, mode='bilinear', align_corners=False)
+            arr = up_t.squeeze().numpy()
+            return self.upscale_heatmap(arr, target_size=self.image_size)
+
         grid = scores.view(1, 1, grid_size, grid_size)
         up = F.interpolate(grid, size=self.image_size, mode='bilinear', align_corners=False)
         return self.upscale_heatmap(up.squeeze().detach().numpy(), target_size=self.image_size)
 
     def upscale_heatmap(self, heatmap, target_size=None):
+        """
+        Upsample heatmap to target_size using bilinear interpolation.
+
+        Args:
+            heatmap: 2D numpy array of shape (H,W)
+            target_size: tuple of ints (H2,W2) for desired output size
+
+        Returns:
+            2D numpy array of shape (H2,W2) upsampled from input heatmap
+        """
         if target_size is None:
             target_size = self.image_size
         t = torch.tensor(heatmap, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
@@ -70,10 +114,19 @@ class ExplanationEngine:
 
     def _forward_patches_batchfirst(self, img_patches, txt_feats, target_idx=None):
         """
-        img_patches : (B, Np, E) or (B, G1, G2, E)
-        txt_feats   : (B, T, E)
-        If target_idx is None -> return logits (B, num_classes)
-        If target_idx is int -> return logits[:, target_idx].unsqueeze(-1) (B,1)
+        Call the fusion model and classifier head on a batch of image patches and text features.
+
+        Args:
+            img_patches: 3D or 4D tensor of shape (B, Np, E) or (B, G1, G2, E) where B is the batch size,
+                Np is the number of patches, G1 and G2 are the grid size, and E is the embedding size.
+            txt_feats: 3D tensor of shape (B, T, E) where B is the batch size, T is the sequence length,
+                and E is the embedding size.
+            target_idx: int or None. If int, the index of the target class to compute the gradient with respect to.
+                If None, return the logits for all classes.
+
+        Returns:
+            If target_idx is None, returns a 2D tensor of shape (B, num_classes) containing the logits for all classes.
+            If target_idx is int, returns a 2D tensor of shape (B, 1) containing the logit for the specified class.
         """
         # Flatten if 4D -> (B, G1*G2, E)
         if img_patches.dim() == 4:
@@ -88,7 +141,7 @@ class ExplanationEngine:
         # create img_global as mean over patches (same as training)
         img_global = img_patches.mean(dim=1)   # (B, E)
 
-        # Call fusion layer — it returns (fused, attn_dict) or fused tensor
+        # call fusion model
         fusion_out = self.fusion_model(
             img_global = img_global,
             img_patch  = img_patches,
@@ -114,9 +167,20 @@ class ExplanationEngine:
                                     txt_feats: torch.Tensor,
                                     target_idx: int) -> np.ndarray:
         """
-        Embedding-based Grad-CAM for patch embeddings.
-        - img_patches: (B, Np, E) or (B, G, G, E)
-        - Returns: HxW numpy heatmap for the first item in batch normalized to [0,1]
+        Compute Grad-CAM explanation map for a single input.
+
+        Args:
+            img_global: (B, E) global image features
+            img_patches: (B, Np, E) or (B, G1, G2, E) image patches
+            txt_feats:   (B, T, E) text features
+            target_idx: int, the index of the target class to explain
+
+        Returns:
+            A 2D numpy array of shape (H, W) containing the explanation map.
+
+        Notes:
+            - Currently only supports batch size 1.
+            - The returned map is normalized to [0,1] per sample.
         """
         # Move to device and ensure patches require grad
         device = getattr(self, "device", img_patches.device)
@@ -130,8 +194,7 @@ class ExplanationEngine:
             txt_feats  = txt_feats,
             return_attention = False
         )
-        if isinstance(fused_out, (tuple, list)):
-            fused_out = fused_out[0]
+        fused_out = fused_out[0] if isinstance(fused_out, (tuple, list)) else fused_out
         logits = self.classifier_head(fused_out)  # (B, num_classes)
 
         # Pick target score scalar: sum across batch to get a single scalar
@@ -183,9 +246,18 @@ class ExplanationEngine:
 
     def compute_ig_map_for_target(self, img_global, img_patches, txt_feats, target_idx, steps=50, internal_batch_size=1):
         """
-        Returns HxW IG heatmap over image patches for the first item in the batch.
-        - img_patches: (B, Np, E)  or (B, G, G, E)
-        - txt_feats:   (B, T, E)
+        Computes an Integrated Gradients heatmap over image patches for a single target class.
+
+        Args:
+            img_global: (B, E) global image features
+            img_patches: (B, Np, E) or (B, G, G, E) image patches
+            txt_feats:   (B, T, E) text features
+            target_idx:  int, index of the target class to explain
+            steps:       int, number of IG steps
+            internal_batch_size: int, batch size to use for internal computation
+
+        Returns:
+            (H, W) numpy heatmap for the first item in batch normalized to [0,1]
         """
         img_patches = img_patches.clone().detach().to(self.device).requires_grad_(True)
         txt_feats   = txt_feats.clone().detach().to(self.device)
@@ -246,6 +318,14 @@ class ExplanationEngine:
         Convert attention weights of arbitrary (B, *, *) shape into a torch tensor shaped (B,1,Np)
         where Np = number of image patches (img_patches.shape[1]).
         Returns None if it cannot reliably infer a per-patch map.
+
+        Parameters:
+            att (torch tensor or None): attention weights
+            img_patches (torch tensor): image patches (B, Np, E)
+            method (str, optional): how to reduce attention weights when Lk > 1. Defaults to "mean"
+
+        Returns:
+            torch tensor (B,1,Np) or None
         """
         if att is None:
             return None
@@ -351,55 +431,6 @@ class ExplanationEngine:
         v = (v - v.min(dim=-1, keepdim=True)[0]) / (v.max(dim=-1, keepdim=True)[0] - v.min(dim=-1, keepdim=True)[0] + 1e-8)
 
         return v
-    
-    def _comb_helper(self, att, other, target_len, min_mass_ratio=0.12, swap=False):
-        if att is None:
-            return None
-        att = self.avg_heads(att)
-        if att is None or att.dim() != 3:
-            return None
-        B, Lq, Lk = att.shape
-        N = int(target_len)
-        if Lk == N:
-            return att.mean(dim=1).unsqueeze(1).detach()
-        if Lq == N:
-            return att.mean(dim=-1).unsqueeze(1).detach()
-
-        if not swap:
-            primary_len = Lk
-            sums = att.sum(dim=1)  # (B, Lk)
-        else:
-            primary_len = Lq
-            sums = att.sum(dim=-1)  # (B, Lq)
-
-        if primary_len < N:
-            return None
-
-        cumsum = torch.cumsum(sums, dim=-1)
-        per_sample = []
-        for b in range(B):
-            row = cumsum[b]
-            if primary_len == N:
-                wins = row[-1].unsqueeze(0)
-            else:
-                end = row[N-1:]
-                start = torch.cat((torch.tensor([0.0], device=row.device), row[:-N]))
-                wins = end - start
-            max_val, max_idx = torch.max(wins, dim=0)
-            total = (sums[b].sum() + 1e-12)
-            if (max_val / total) < min_mass_ratio:
-                per_sample.append(torch.zeros(N, device=att.device))
-                continue
-            off = int(max_idx.item())
-            if not swap:
-                slice_block = att[b:b+1, :, off:off+N]
-                per_vec = slice_block.mean(dim=1).squeeze(0)
-            else:
-                slice_block = att[b:b+1, off:off+N, :]
-                per_vec = slice_block.mean(dim=-1).squeeze(0)
-            per_sample.append(per_vec)
-        out = torch.stack(per_sample, dim=0)
-        return out.unsqueeze(1).detach()
 
     def comb_attention_to_patch_vector(self, att, img_patches, min_mass_ratio=0.12):
         return self._comb_helper(att, img_patches, target_len=img_patches.shape[1], min_mass_ratio=min_mass_ratio, swap=False)
@@ -408,27 +439,39 @@ class ExplanationEngine:
         return self._comb_helper(att, txt_feats, target_len=txt_feats.shape[1], min_mass_ratio=min_mass_ratio, swap=True)
 
     def txt2img_to_patch_vector(self, att_txt2img, img_patches, reduction="mean"):
+        """
+        Extract a per-patch attention vector from the txt2img attention map.
+
+        Args:
+            att_txt2img (torch.Tensor): raw attention [B, H, T, Np] or [B, T, Np]
+            img_patches (torch.Tensor): image patches [B, Np, E]
+            reduction (str): reduction method, either "mean" (default) or "max"
+
+        Returns:
+            torch.Tensor: per-patch vector [B, 1, Np], normalized to [0,1]
+        """
         att = self.avg_heads(att_txt2img)
-        if att is None:
+        if att is None or att.dim() != 3:
             return None
-        if att.dim() != 3:
-            return None
-        if reduction == "mean":
-            per_patch = att.mean(dim=1)
-        else:
-            per_patch = att.mean(dim=1)
+        per_patch = att.mean(dim=1)
         return per_patch.unsqueeze(1).detach()
 
     def img2txt_to_token_vector(self, att_img2txt, txt_feats, reduction="mean"):
+        """
+        Extract a per-token attention vector from the img2txt attention map.
+
+        Args:
+            att_img2txt (torch.Tensor): raw attention [B, H, T, Nt] or [B, T, Nt]
+            txt_feats (torch.Tensor): text features [B, Nt, D]
+            reduction (str): reduction method, either "mean" (default) or "max"
+
+        Returns:
+            torch.Tensor: per-token vector [B, 1, Nt], normalized to [0,1]
+        """
         att = self.avg_heads(att_img2txt)
-        if att is None:
+        if att is None or att.dim() != 3:
             return None
-        if att.dim() != 3:
-            return None
-        if reduction == "mean":
-            per_token = att.mean(dim=1)
-        else:
-            per_token = att.mean(dim=1)
+        per_token = att.mean(dim=1)
         return per_token.unsqueeze(1).detach()
     
     def _comb_helper(self, att, other, target_len, min_mass_ratio=0.12, swap=False):
@@ -441,6 +484,13 @@ class ExplanationEngine:
         att = self.avg_heads(att)
         if att is None or att.dim() != 3:
             return None
+        
+        if other is not None and hasattr(other, "device"):
+            try:
+                att = att.to(other.device)
+            except Exception:
+                warnings.warn(f"Cannot transfer attention matrix to {other.device}; continuing on att's device")
+
         B, Lq, Lk = att.shape
         N = int(target_len)
         # quick exact matches
@@ -539,38 +589,74 @@ class ExplanationEngine:
         t_from_comb = None
 
         if att_comb is not None:
-            # Try extracting patch-level attention
-            p_from_comb = self.comb_attention_to_patch_vector(att_comb, img_patches, min_mass_ratio=0.12)
+            print("[DEBUG] comb att shape:", att_comb.shape,
+                "min:", att_comb.min().item(), "max:", att_comb.max().item(),
+                "mean:", att_comb.mean().item())
+
+        if att_comb is not None:
+            # patch-level comb
+            p_from_comb = self.comb_attention_to_patch_vector(att_comb, img_patches, min_mass_ratio=0.06)
             if p_from_comb is None:
                 p_from_comb = self._attn_to_patch_tensor(att_comb, img_patches, method="mean")
+                print("[INFO] comb_img fallback: used mean patch tensor")
 
             if p_from_comb is not None:
                 N = p_from_comb.shape[-1]
                 G = int(math.sqrt(N)) if int(math.sqrt(N)) ** 2 == N else None
-                if G is None:
-                    print(f"[WARN] comb->img skip: {N} not square")
-                else:
-                    attention_maps["comb_img"] = self.compute_attention_map(p_from_comb, grid_size=G)
+                if G is not None:
+                    # if p_from_comb is constant zeros, consider fallback
+                    if torch.allclose(p_from_comb, torch.zeros_like(p_from_comb)):
+                        print("[INFO] comb_img was constant -> leaving out (fallback will be used)")
+                    else:
+                        attention_maps["comb_img"] = self.compute_attention_map(p_from_comb, grid_size=G)
 
-            # Try extracting token-level attention
+            # token-level comb
             t_from_comb = self.comb_attention_to_token_vector(att_comb, txt_feats, min_mass_ratio=0.0)
             if t_from_comb is None:
                 t_from_comb = self._attn_to_token_tensor(att_comb, txt_feats, method="mean")
+                print("[INFO] comb_txt fallback: used mean token tensor")
 
             if t_from_comb is not None:
-                attention_maps["comb_txt"] = t_from_comb[0, 0].detach().cpu().numpy()
+                # skip near-constant vectors
+                if torch.allclose(t_from_comb, torch.zeros_like(t_from_comb)):
+                    print("[INFO] comb_txt was constant -> leaving out (fallback will be used)")
+                else:
+                    attention_maps["comb_txt"] = t_from_comb[0, 0].detach().cpu().numpy()
 
         # Combine to final maps (weighted)
         final_patch = None
         if p_from_txt is not None and p_from_comb is not None:
+            device = p_from_txt.device
+            p_from_comb = p_from_comb.to(device)
+
+            # ensure same patch length before arithmetic (trim to shorter)
+            Lp_txt = p_from_txt.size(-1)
+            Lp_comb = p_from_comb.size(-1)
+            if Lp_txt != Lp_comb:
+                minL = min(Lp_txt, Lp_comb)
+                p_from_txt = p_from_txt[..., :minL]
+                p_from_comb = p_from_comb[..., :minL]
+                print(f"[INFO] patch-length mismatch: trimmed to {minL} (was {Lp_txt},{Lp_comb})")
             final_patch = 0.6 * p_from_txt + 0.4 * p_from_comb
         elif p_from_txt is not None:
             final_patch = p_from_txt
         elif p_from_comb is not None:
             final_patch = p_from_comb
 
+        # Combine token maps (already had code for tokens) — keep your trimming approach
         final_token = None
         if t_from_img is not None and t_from_comb is not None:
+            device = t_from_img.device
+            t_from_comb = t_from_comb.to(device)
+
+            # ensure same token length before arithmetic (trim to shorter)
+            L_img = t_from_img.size(-1)
+            L_comb = t_from_comb.size(-1)
+            if L_img != L_comb:
+                minL = min(L_img, L_comb)
+                t_from_img = t_from_img[..., :minL]
+                t_from_comb = t_from_comb[..., :minL]
+                print(f"[INFO] token-length mismatch: trimmed to {minL} (was {L_img},{L_comb})")
             final_token = 0.6 * t_from_img + 0.4 * t_from_comb
         elif t_from_img is not None:
             final_token = t_from_img
@@ -580,7 +666,7 @@ class ExplanationEngine:
         def _norm_and_to_numpy(x):
             if x is None:
                 return None
-            y = x.clone()
+            y = x.clone().detach().cpu()
             mi = y.view(y.size(0), -1).min(dim=1)[0].view(-1, 1, 1)
             ma = y.view(y.size(0), -1).max(dim=1)[0].view(-1, 1, 1)
             y = (y - mi) / (ma - mi + 1e-8)

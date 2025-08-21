@@ -160,20 +160,13 @@ class CrossModalFusion(nn.Module):
         self.img_patch_proj = nn.Linear(img_dim, joint_dim)
         self.img_global_proj = nn.Linear(img_dim, joint_dim)
 
-        # final projection after concatenating attended img + text
-        self.output = nn.Sequential(
-            nn.Linear(joint_dim * 2, joint_dim),
-            nn.ReLU(),
-            nn.Dropout(0.3)
-        )
-        self.adapter = nn.Sequential(
-            nn.Linear(joint_dim, joint_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(joint_dim // 2, joint_dim)
-        )
-
         self.use_cls_only = use_cls_only
+        self.comb_mlp = nn.Sequential(
+            nn.Linear(joint_dim * 3, joint_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(joint_dim, joint_dim)
+        )
 
     def forward(self, img_global, img_patch, txt_feats, return_attention=False):
         """
@@ -193,21 +186,21 @@ class CrossModalFusion(nn.Module):
         # img_patch:  (B, N_patches, img_dim)
         # txt_feats:  (B, txt_dim)
         txt_feats = self.txt_self_attn(txt_feats)
+        img_global = self.img_global_self_attn(img_global.unsqueeze(1)).squeeze(1) # (B,D)
+        img_patch = self.img_patch_self_attn(img_patch)           # (B, N, D)
+        
+        # Handle CLS token usage
         if self.use_cls_only:
             txt_feats_pooled = txt_feats[:, 0].unsqueeze(1)  # (B, 1, D)
         else:
             txt_feats_pooled = txt_feats                     # (B, L, D)
-        img_global = self.img_global_self_attn(img_global.unsqueeze(1)).squeeze(1)
-        img_patch = self.img_patch_self_attn(img_patch)
-
-        B, N, D = img_patch.shape
+        B, Np, D = img_patch.shape
 
         # Text attends to image patches
         Q_txt = self.query_txt(txt_feats_pooled)                   # (B, L or 1, D)
         K_img = self.key_img(img_patch)                            # (B, N, D)
         V_img = self.value_img(img_patch)                          # (B, N, D)
         att_txt2img, attn_weights_txt2img = self.attn_txt2img(Q_txt, K_img, V_img)
-        att_txt2img = att_txt2img.mean(dim=1)                      # (B, D) ← pool across tokens if L > 1
 
         # Image patches attend to text
         Q_img = self.query_img(img_patch)                   # (B, N, D)
@@ -215,28 +208,40 @@ class CrossModalFusion(nn.Module):
         V_txt = self.value_txt(txt_feats_pooled)            # (B, L or 1, D)
         att_img2txt, attn_weights_img2txt = self.attn_img2txt(Q_img, K_txt, V_txt)
 
-        # Pool fused patches to get updated patch image vector
+        # Fuse image patches with text
         img_patch_proj = self.img_patch_proj(img_patch)     # (B, N, joint_dim)
-        patches_fused = img_patch_proj + att_img2txt      
+        patches_fused = img_patch_proj + att_img2txt        # (B, N, joint_dim)
 
-        # Pool fused patches to get updated global image vector
+        # Fuse global image features with text
         img_global_proj = self.img_global_proj(img_global)                              # (B, joint_dim)
-        img_global_updated = patches_fused.mean(dim=1) + img_global_proj                    
+        att_txt2img_pooled = att_txt2img.mean(dim=1)
+        img_global_updated = img_global_proj + att_txt2img_pooled
+        x1 = self.ln_img(img_global_updated)                    
         
         # Pool text features
         txt_p = self.txt_proj(txt_feats)
         txt_cls = txt_p[:, 0]
-
-        # Concatenate and final projection
         att_img2txt_pooled = att_img2txt.mean(dim=1)
-        x1 = self.ln_img(img_global_updated + att_txt2img)
         x2 = self.ln_txt(txt_cls + att_img2txt_pooled)
-        x = torch.cat([x1, x2], dim=1)                                                  # (B, joint_dim + txt_dim)
-        fused = self.output(x)
-        fused = fused + self.adapter(fused)                                             # (B, joint_dim)
 
+        patch_toks = patches_fused                                       # (B, N, joint_dim)
+        cls_tok = x1.unsqueeze(1)                                        # (B, 1, joint_dim)
+        txt_tok = x2.unsqueeze(1)                                        # (B, 1, joint_dim)
+
+        attn_dict = {'txt2img': attn_weights_txt2img, 'img2txt': attn_weights_img2txt}
+        
+        if self.use_cls_only:
+            # compute fused vector via MLP combiner
+            patch_avg = patches_fused.mean(dim=1)  # (B, D)
+            cat = torch.cat([x1, patch_avg, x2], dim=1)  # (B, 3*D)
+            fused_vec = self.comb_mlp(cat)  # (B, D)
+
+            attn_dict['patch_avg'] = patch_avg.detach() 
+            if return_attention:
+                return fused_vec, attn_dict
+            return fused_vec, None
+
+        seq = torch.cat([cls_tok, patch_toks, txt_tok], dim=1)  # (B, 1+Np+1, joint_dim)
         if return_attention:
-            return fused, {'txt2img': attn_weights_txt2img, 'img2txt': attn_weights_img2txt}
-        return fused, None
-
-
+            return seq, attn_dict
+        return seq, None

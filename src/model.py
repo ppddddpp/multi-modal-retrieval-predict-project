@@ -242,17 +242,16 @@ class MultiModalRetrievalModel(nn.Module):
         self.retriever = retriever
 
     def forward(self, image, input_ids, attention_mask, return_attention=False):
-        # extracting separate features
         """
         Inputs:
-          image (torch.Tensor): (B, 3, H, W)
-          input_ids (torch.Tensor): (B, L)
-          attention_mask (torch.Tensor): (B, L)
+        image (torch.Tensor): (B, C, H, W)
+        input_ids (torch.Tensor): (B, L)
+        attention_mask (torch.Tensor): (B, L)
 
         Returns:
-          joint_emb (torch.Tensor): (B, joint_dim)
-          logits (torch.Tensor): (B, num_classes)
-          dict: A dictionary containing the attention weights if return_attention is True.
+        joint_emb (torch.Tensor): (B, joint_dim)
+        logits (torch.Tensor): (B, num_classes)
+        dict: attn_weights (only if return_attention=True)
         """
         (img_global, img_patches), txt_feats = self.backbones(
             image.to(self.device),
@@ -264,25 +263,63 @@ class MultiModalRetrievalModel(nn.Module):
         joint_emb = None
 
         for i, fusion in enumerate(self.fusion_layers):
-            fused, attn = fusion(
+            # fusion may return either pooled (B, D) or sequence (B, L, D)
+            fused_out, attn_from_fusion = fusion(
                 img_global,
                 img_patches,
                 txt_feats,
                 return_attention=return_attention
             )
-            if self.use_cls_only:
-                fused = self.dropout(fused)
-                fused = fused.unsqueeze(1)
+
+            # Handling fuse output 
+            if fused_out is None:
+                raise RuntimeError("Fusion returned None fused_out")
+            if fused_out.dim() == 3:
+                seq = fused_out  # (B, L, D)
+            elif fused_out.dim() == 2:
+                seq = fused_out.unsqueeze(1)  # (B, 1, D)
             else:
-                fused = self.dropout(fused)
+                raise RuntimeError(f"Unexpected fused_out shape: {fused_out.shape}")
 
-            fused = self.pos_encoder(fused)  # Add positional encoding
-            fused, _ = self.self_attn(fused, fused, fused)
-            fused, self_attn_weights = self.self_attn(fused, fused, fused)
+            # dropout + positional encoding (seq: B,L,D)
+            seq = self.dropout(seq)
+            seq = self.pos_encoder(seq)
+
+            seq_out, comb_attn_weights = self.self_attn(seq, seq, seq)
+
+            # store comb & fusion attn weights (detach -> cpu to avoid keeping graph)
             if return_attention:
-                attn_weights[f"layer_{i}_comb"] = self_attn_weights
+                try:
+                    attn_weights[f"layer_{i}_comb"] = comb_attn_weights.detach().cpu()
+                except Exception:
+                    # comb_attn_weights may be None or not a tensor (guard)
+                    attn_weights[f"layer_{i}_comb"] = comb_attn_weights
 
-            # First layer does not have residual connection
+                # fusion produced cross-attention dict (txt2img/img2txt) — store if present
+                if attn_from_fusion:
+                    if "txt2img" in attn_from_fusion and attn_from_fusion["txt2img"] is not None:
+                        try:
+                            attn_weights[f"layer_{i}_txt2img"] = attn_from_fusion["txt2img"].detach().cpu()
+                        except Exception:
+                            attn_weights[f"layer_{i}_txt2img"] = attn_from_fusion["txt2img"]
+                    if "img2txt" in attn_from_fusion and attn_from_fusion["img2txt"] is not None:
+                        try:
+                            attn_weights[f"layer_{i}_img2txt"] = attn_from_fusion["img2txt"].detach().cpu()
+                        except Exception:
+                            attn_weights[f"layer_{i}_img2txt"] = attn_from_fusion["img2txt"]
+                    # optional extras (patch_avg etc.)
+                    if "patch_avg" in attn_from_fusion:
+                        try:
+                            attn_weights[f"layer_{i}_patch_avg"] = attn_from_fusion["patch_avg"].detach().cpu()
+                        except Exception:
+                            attn_weights[f"layer_{i}_patch_avg"] = attn_from_fusion["patch_avg"]
+
+            if self.use_cls_only:
+                fused = fused_out[:, 0, :]
+            else:
+                fused = seq_out.mean(dim=1)
+
+            # Residual
             if i == 0:
                 x = fused
             else:
@@ -294,28 +331,25 @@ class MultiModalRetrievalModel(nn.Module):
             if self.use_shared_ffn:
                 x = x + self.shared_ffn(x_ffn)
             else:
-                x = x + self.ffn[i](x_ffn)             
+                x = x + self.ffn[i](x_ffn)
             x = x + self.adapters[i](x)
 
             # Update joint_emb
             joint_emb = x
 
-            # Collect per-layer attention maps
-            if return_attention and attn is not None:
-                attn_weights[f"layer_{i}_txt2img"] = attn["txt2img"]
-                attn_weights[f"layer_{i}_img2txt"] = attn["img2txt"]
-    
+        # After loop, ensure joint_emb is (B, D)
+        if joint_emb is None:
+            raise RuntimeError("joint_emb is still None after forward")
         if joint_emb.dim() == 3:
-            # If singleton seq dim (B, 1, D) -> squeeze; otherwise pool across tokens.
+            # if singleton seq dim (B,1,D) -> squeeze; otherwise mean-pool tokens
             if joint_emb.size(1) == 1:
-                joint_emb = joint_emb.squeeze(1)           # -> (B, D)
+                joint_emb = joint_emb.squeeze(1)
             else:
-                # mean pooling across sequence axis
                 joint_emb = joint_emb.mean(dim=1)
 
         logits = self.classifier(joint_emb)
 
-        return joint_emb, logits, attn_weights if return_attention else None
+        return joint_emb, logits, (attn_weights if return_attention else None)
 
     def predict(self,
                 image: torch.Tensor,
@@ -395,6 +429,7 @@ class MultiModalRetrievalModel(nn.Module):
             "comb":    attn_weights.get(f"layer_{last_idx}_comb", None)
         }
 
+        # Get attention maps explained
         maps = self.explainer.explain(
             img_global=img_global,
             img_patches=img_patches,
@@ -422,7 +457,7 @@ class MultiModalRetrievalModel(nn.Module):
         Computes explanation maps for a single input using three methods.
 
         Args:
-            image: torch.Tensor of shape (B, 3, H, W)
+            image: torch.Tensor of shape (B, C, H, W)
             input_ids: torch.Tensor of shape (B, T)
             attention_mask: torch.Tensor of shape (B, T)
             targets: single int or list of ints for the class indices to explain

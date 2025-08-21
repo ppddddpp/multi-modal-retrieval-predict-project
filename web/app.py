@@ -158,6 +158,7 @@ def safe_unpack_topk(topk_any):
 def index():
     context = {}
     if request.method == "POST":
+        print("[INFO] POST request")
         # --- Load inputs ---
         dcm_bytes  = request.files["dicom_file"].read()
         raw_tensor = preproc(dcm_bytes)                 # shape (C,H,W) or (1,H,W)
