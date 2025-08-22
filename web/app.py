@@ -174,7 +174,7 @@ def index():
         )
         txt_ids  = tokens.input_ids.to(device)
         txt_mask = tokens.attention_mask.to(device)
-
+        
         # prepare orig_arr for visualization (H,W) scaled 0..1
         orig_arr = raw_tensor.squeeze().cpu().numpy()
         if orig_arr.dtype != np.float32 and orig_arr.max() > 1.0:
@@ -222,24 +222,9 @@ def index():
         if main_target is None and len(ig_maps_q) > 0:
             main_target = list(ig_maps_q.keys())[0]
 
-        print("[DEBUG] att_maps_q keys:", list(att_maps_q.keys()))
-        print("[DEBUG] ig_maps_q keys:", list(ig_maps_q.keys()))
-        print("[DEBUG] gradcam_maps_q keys:", list(gradcam_maps_q.keys()))
-
-        for k, v in att_maps_q.items():
-            if v is not None:
-                print(f"[DEBUG] ATT[{k}] min={np.min(v):.4f}, max={np.max(v):.4f}, mean={np.mean(v):.4f}, std={np.std(v):.4f}, unique={np.unique(v).size}")
-
-        for k, v in ig_maps_q.items():
-            if v is not None:
-                print(f"[DEBUG] IG[{k}] min={np.min(v):.4f}, max={np.max(v):.4f}, mean={np.mean(v):.4f}")
-
-        for k, v in gradcam_maps_q.items():
-            if v is not None:
-                print(f"[DEBUG] GradCAM[{k}] min={np.min(v):.4f}, max={np.max(v):.4f}, mean={np.mean(v):.4f}")
-
         # prepare visuals for the query image
         context['img_orig'] = np_to_base64_img(img_tensor.squeeze().cpu().numpy(), cmap="gray")
+        context["text_query"] = text_query
         context['attn_map_q_b64'] = None
         context['ig_map_q_b64']   = None
         context['gradcam_map_q_b64'] = None
@@ -482,12 +467,32 @@ def index():
                 for i in range(len(retrieved_att_maps)):
                     for j in range(i + 1, len(retrieved_att_maps)):
                         cm = compare_maps(retrieved_att_maps[i], retrieved_att_maps[j], topk_frac=0.05)
-                        overlaps.append(cm['iou_top5pct'])  # IoU for top 5%
+                        overlaps.append(cm['iou_top5pct'])
                 avg_overlap = np.mean(overlaps)
                 avg_diversity = 1 - avg_overlap
                 context['retrieval_diversity_score'] = round(avg_diversity, 4)
             else:
                 context['retrieval_diversity_score'] = None
+
+            # --- Compute overlap/diversity restricted to same-class retrieved items ---
+            same_class_maps = []
+            for item, amap in zip(retrieval_detailed, retrieved_att_maps):
+                if main_target is not None and label_cols[main_target] in item["labels"]:
+                    same_class_maps.append(amap)
+
+            if len(same_class_maps) > 1:
+                overlaps = []
+                for i in range(len(same_class_maps)):
+                    for j in range(i + 1, len(same_class_maps)):
+                        cm = compare_maps(same_class_maps[i], same_class_maps[j], topk_frac=0.05)
+                        overlaps.append(cm['iou_top5pct'])
+                avg_overlap = np.mean(overlaps)
+                avg_diversity = 1 - avg_overlap
+                context['retrieval_same_class_overlap'] = round(avg_overlap, 4)
+                context['retrieval_same_class_diversity'] = round(avg_diversity, 4)
+            else:
+                context['retrieval_same_class_overlap'] = None
+                context['retrieval_same_class_diversity'] = None
                 
         context["retrieval_detailed"] = retrieval_detailed
 

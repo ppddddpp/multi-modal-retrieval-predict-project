@@ -273,7 +273,8 @@ class ExplanationEngine:
             inputs=img_patches,
             baselines=baselines,
             n_steps=steps,
-            internal_batch_size=internal_batch_size
+            internal_batch_size=internal_batch_size,
+            target=int(target_idx)
         )  # (B, Np, E) or (B, G, G, E)
 
         # Reduce embed dim to single importance per patch
@@ -395,6 +396,144 @@ class ExplanationEngine:
         # other dims -> cannot handle
         return None
     
+    def compute_comb_token_vector(
+        self,
+        att_comb,
+        txt_feats,
+        attn_weights=None,
+        *,
+        eps=1e-8,
+        atol_zero=1e-7,
+        debug=False
+    ):
+        """
+        Robust cascade to produce a token-level importance map [B, 1, T] from
+        the combined attention `att_comb` and text features `txt_feats`.
+
+        Order tried:
+        1) self.comb_attention_to_token_vector(...) (existing heuristic)
+        2) self._attn_to_token_tensor(att_comb, txt_feats, method="mean")
+            (uses robust normalizer that returns uniform if constant)
+        3) collapse heads/queries -> softmax over tokens -> attention-weighted tokens
+        4) fallback to attn_weights['img2txt'] -> self.img2txt_to_token_vector(...)
+        5) final fallback: mean token tensor via _attn_to_token_tensor (guaranteed non-empty)
+
+        Returns:
+        torch.Tensor of shape [B, 1, T] (float) always non-None.
+        """
+        device = txt_feats.device if txt_feats is not None else (att_comb.device if att_comb is not None else None)
+        dtype = txt_feats.dtype if txt_feats is not None else torch.float32
+
+        # 0: safety
+        if txt_feats is None:
+            # nothing to compute — return zeros shaped [B,1,1] to avoid None
+            return None
+
+        B, T, E = txt_feats.shape
+
+        # 1) Try primary heuristic
+        try:
+            t_from_comb = self.comb_attention_to_token_vector(att_comb, txt_feats, min_mass_ratio=0.0)
+            if debug:
+                print("[DBG compute_comb_token_vector] primary comb_attention_to_token_vector ->",
+                    "None" if t_from_comb is None else t_from_comb.shape)
+        except Exception as e:
+            if debug:
+                print(f"[DBG compute_comb_token_vector] primary heuristic raised: {e}")
+            t_from_comb = None
+
+        # 2) Fallback: robust reduction to token tensor (this should produce uniform if constant)
+        if t_from_comb is None:
+            try:
+                t_from_comb = self._attn_to_token_tensor(att_comb, txt_feats, method="mean")
+                if debug:
+                    print("[DBG compute_comb_token_vector] used _attn_to_token_tensor", t_from_comb.shape)
+            except Exception as e:
+                if debug:
+                    print(f"[DBG compute_comb_token_vector] _attn_to_token_tensor failed: {e}")
+                t_from_comb = None
+
+        # Helper to check "all zeroish"
+        def is_zeroish(t):
+            return t is None or torch.allclose(t, torch.zeros_like(t), atol=atol_zero)
+
+        # 3) If still degenerate, attempt collapsing heads/queries into token importance
+        if not (t_from_comb is None) and is_zeroish(t_from_comb):
+            # treat degenerate as not useful and try a recompute
+            t_from_comb = None
+
+        if t_from_comb is None:
+            try:
+                if att_comb is not None:
+                    # collapse heads: want [B, Lq, Lk] or [B, Lk]
+                    att_tmp = self.avg_heads(att_comb)  # you already have this helper
+                    if debug:
+                        print("[DBG compute_comb_token_vector] avg_heads ->", getattr(att_tmp, "shape", None))
+
+                    # If att_tmp is [B, Lq, Lk], average queries (Lq) to get token weights
+                    if att_tmp.dim() == 3:
+                        att_tok = att_tmp.mean(dim=1)  # [B, Lk]
+                    elif att_tmp.dim() == 2:
+                        att_tok = att_tmp
+                    else:
+                        att_tok = att_tmp.reshape(att_tmp.shape[0], -1)
+
+                    # Align length with txt_feats' T
+                    B2, Lk = att_tok.shape
+                    if Lk != T:
+                        if Lk > T:
+                            att_tok = att_tok[:, :T]
+                        else:
+                            pad = torch.full((B2, T - Lk), fill_value=1e-6, device=att_tok.device, dtype=att_tok.dtype)
+                            att_tok = torch.cat([att_tok, pad], dim=1)
+
+                    # stable softmax
+                    att_tok = torch.nn.functional.softmax(att_tok, dim=-1)  # [B, T]
+                    # weighted sum over tokens -> (B, E) (useable if needed)
+                    # tok_emb = txt_feats  # (B, T, E)
+                    # comb_tok_vec = torch.einsum('bt,bte->be', att_tok, tok_emb)
+                    # but we want a token map -> return att_tok as [B,1,T]
+                    t_from_comb = att_tok.unsqueeze(1)
+                    if debug:
+                        print("[DBG compute_comb_token_vector] recomputed att_tok ->", t_from_comb.shape)
+            except Exception as e:
+                if debug:
+                    print(f"[DBG compute_comb_token_vector] collapsed att recompute failed: {e}")
+                t_from_comb = None
+
+        # 4) Try img2txt alternative if still degenerate and attn_weights provided
+        if is_zeroish(t_from_comb) and attn_weights is not None:
+            try:
+                att_img2txt = attn_weights.get("img2txt", None)
+                if att_img2txt is not None:
+                    t_alt = self.img2txt_to_token_vector(att_img2txt, txt_feats)
+                    if not is_zeroish(t_alt):
+                        t_from_comb = t_alt
+                        if debug:
+                            print("[DBG compute_comb_token_vector] used img2txt_to_token_vector")
+            except Exception as e:
+                if debug:
+                    print(f"[DBG compute_comb_token_vector] img2txt fallback failed: {e}")
+
+        # 5) Final fallback: guaranteed non-empty via robust normalizer
+        if t_from_comb is None or is_zeroish(t_from_comb):
+            try:
+                t_from_comb = self._attn_to_token_tensor(att_comb, txt_feats, method="mean")
+                if debug:
+                    print("[DBG compute_comb_token_vector] final fallback to mean token tensor", t_from_comb.shape)
+            except Exception as e:
+                if debug:
+                    print(f"[DBG compute_comb_token_vector] final fallback failed: {e}")
+                # As absolute last resort, return uniform
+                uniform = torch.ones((B, 1, T), device=device, dtype=dtype) / float(T)
+                t_from_comb = uniform
+                if debug:
+                    print("[DBG compute_comb_token_vector] returned uniform last-resort", t_from_comb.shape)
+
+        # ensure shape [B,1,T] and dtype/device
+        t_from_comb = t_from_comb.to(device=device, dtype=dtype)
+        return t_from_comb
+
     def _attn_to_token_tensor(self, att, txt_feats, method="mean"):
         """
         Fallback: reduce attention matrix to token-level importance scores.
@@ -424,13 +563,28 @@ class ExplanationEngine:
         else:
             raise ValueError(f"Unknown reduction method: {method}")
 
-        # collapse context dimension → get a single score per token
+        # collapse context dimension -> get a single score per token
         v = v.mean(dim=-1, keepdim=True).transpose(1, 2)  # [B, 1, T]
 
-        # normalize to [0,1]
-        v = (v - v.min(dim=-1, keepdim=True)[0]) / (v.max(dim=-1, keepdim=True)[0] - v.min(dim=-1, keepdim=True)[0] + 1e-8)
+        # Robust normalization to [0,1]. If the map is constant (max==min),
+        # return a uniform distribution instead of a zero vector.
+        v_min = v.min(dim=-1, keepdim=True)[0]   # [B,1,1]
+        v_max = v.max(dim=-1, keepdim=True)[0]   # [B,1,1]
+        range_ = (v_max - v_min)
 
-        return v
+        eps = 1e-8
+        is_constant = (range_.abs() < eps).squeeze(-1).squeeze(-1)  # [B] boolean per sample
+
+        v_norm = (v - v_min) / (range_ + eps)
+
+        if is_constant.any():
+            # uniform over tokens for constant samples
+            uniform = torch.ones_like(v_norm) / float(T)  # [B,1,T]
+            mask = is_constant.view(B, 1, 1)
+            v_norm = torch.where(mask, uniform, v_norm)
+
+        v_norm = v_norm.clamp(0.0, 1.0)
+        return v_norm.detach()
 
     def comb_attention_to_patch_vector(self, att, img_patches, min_mass_ratio=0.12):
         return self._comb_helper(att, img_patches, target_len=img_patches.shape[1], min_mass_ratio=min_mass_ratio, swap=False)
@@ -589,11 +743,6 @@ class ExplanationEngine:
         t_from_comb = None
 
         if att_comb is not None:
-            print("[DEBUG] comb att shape:", att_comb.shape,
-                "min:", att_comb.min().item(), "max:", att_comb.max().item(),
-                "mean:", att_comb.mean().item())
-
-        if att_comb is not None:
             # patch-level comb
             p_from_comb = self.comb_attention_to_patch_vector(att_comb, img_patches, min_mass_ratio=0.06)
             if p_from_comb is None:
@@ -611,13 +760,15 @@ class ExplanationEngine:
                         attention_maps["comb_img"] = self.compute_attention_map(p_from_comb, grid_size=G)
 
             # token-level comb
-            t_from_comb = self.comb_attention_to_token_vector(att_comb, txt_feats, min_mass_ratio=0.0)
-            if t_from_comb is None:
-                t_from_comb = self._attn_to_token_tensor(att_comb, txt_feats, method="mean")
-                print("[INFO] comb_txt fallback: used mean token tensor")
+            debug = False
+            t_from_comb = self.compute_comb_token_vector(att_comb, txt_feats, attn_weights=attn_weights, debug=debug)
 
             if t_from_comb is not None:
-                # skip near-constant vectors
+                if debug:
+                    print("[DBG] t_from_comb stats — min,max,mean,std:",
+                        float(t_from_comb.min()), float(t_from_comb.max()),
+                        float(t_from_comb.mean()), float(t_from_comb.std()))
+                # if it's effectively all zeros skip, otherwise include it
                 if torch.allclose(t_from_comb, torch.zeros_like(t_from_comb)):
                     print("[INFO] comb_txt was constant -> leaving out (fallback will be used)")
                 else:
