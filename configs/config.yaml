@@ -11,7 +11,7 @@ gamma_focal: 1
 text_dim: 512
 focal_ratio: 0.3
 temperature: 0.125
-cls_weight: 1.5
+cls_weight: 2.0
 cont_weight: 0.3
 num_heads: 8
 use_shared_ffn: false
