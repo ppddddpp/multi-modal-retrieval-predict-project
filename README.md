@@ -175,11 +175,15 @@ You can visualize:
 
 * Top retrieved similar cases
 * Text-to-image attention heatmaps
-* IG-based disease explanations
+* IG/GAMCAM-based disease explanations
 
 ### Predict & Explain
 ![Predict & Explain](demo/1.png)
 ![Predict & Explain](demo/2.png)
+![Predict & Explain](demo/3.png)
+![Predict & Explain](demo/4.png)
+![Predict & Explain](demo/5.png)
+![Predict & Explain](demo/6.png)
 
 ### Retrieval Demo
 ![Retrieval Demo](demo/3.png)

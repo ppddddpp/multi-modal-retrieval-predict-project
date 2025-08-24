@@ -187,6 +187,7 @@ data
 outputs
 models
 splited_data
+retrieval_diversity_score
 
 # Local information
 step.txt
@@ -198,6 +199,7 @@ EDA_before_split.ipynb
 data_phrase_check.ipynb
 dataEDAnLabeledCheck.ipynb
 finalOutputDataEDA.ipynb
+show_iou_scores.ipynb
 uploadHF.py
 
 # Ignore additional files and folders
