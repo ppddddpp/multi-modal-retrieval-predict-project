@@ -1,4 +1,4 @@
-# Specify Python version used for development Python 3.11.8
+# Specify Python version used for development Python 3.11.13
 # This is a recommendation, as pip does not enforce Python versions from requirements.txt directly.
 # For stricter environment control, consider tools like conda or pyenv.
 
@@ -20,4 +20,7 @@ spacy==3.8.7
 # python -m spacy download en_core_sci_sm
 # python -m spacy download en_core_web_sm
 google-genai==1.5.0
+negspacy==1.0.4
+pydicom==3.0.1
+captum==0.8.0
 negspacy==1.0.4
