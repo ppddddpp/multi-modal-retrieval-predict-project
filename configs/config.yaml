@@ -16,4 +16,4 @@ cont_weight: 0.3
 num_heads: 8
 use_shared_ffn: false
 use_cls_only: false
-project_name: "multimodal-disease-classification-2807"
+project_name: "multimodal-disease-classification-1009-experiments"
