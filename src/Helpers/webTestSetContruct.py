@@ -4,7 +4,7 @@ import random
 from pathlib import Path
 from DataHandler import parse_openi_xml
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 XML_DIR = BASE_DIR / "data/openi/xml/NLMCXR_reports/ecgen-radiology"
 DICOM_DIR = BASE_DIR / "data/openi/dicom"
 SPLIT_DIR = BASE_DIR / "splited_data"

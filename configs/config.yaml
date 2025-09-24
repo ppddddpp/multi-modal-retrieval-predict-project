@@ -1,5 +1,5 @@
 # Training parameters
-epochs:    2
+epochs:    50
 patience:  10
 batch_size: 1
 lr:        2e-5
@@ -8,6 +8,7 @@ lr:        2e-5
 num_fusion_layers: 5
 use_focal: false
 use_hybrid: true
+image_backbone: "swin"
 fusion_type: "cross"
 joint_dim: 1024
 num_heads: 8
@@ -18,9 +19,9 @@ use_cls_only: false
 # Knowledge graph parameters
 kg_method: "cosine"
 kg_emb_dim: 300
-kg_epochs: 5 
+kg_epochs: 30 
 kg_weight: 0.1
-kg_mode: "dataset"   # options: dataset | ontology | hybrid
+kg_mode: "hybrid"   # options: dataset | ontology | hybrid
 
 # Loss parameters
 cls_weight: 2.0

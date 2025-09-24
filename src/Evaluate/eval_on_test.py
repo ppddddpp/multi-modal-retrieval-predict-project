@@ -10,7 +10,7 @@ from Model import MultiModalRetrievalModel
 from DataHandler import build_dataloader, parse_openi_xml
 from LabelData import disease_groups, normal_groups
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 CONFIG_PATH = BASE_DIR / "configs" / "config.yaml"
 CKPT_PATH   = BASE_DIR / "checkpoints" / "model_best.pt"
 SPLIT_DIR  = BASE_DIR / "splited_data"
@@ -19,7 +19,6 @@ DICOM_ROOT = BASE_DIR / "data" / "openi" / "dicom"
 LABELS_CSV = BASE_DIR / "outputs" / "openi_labels_final.csv"
 
 def eval_on_test():
-
     # Load config and device
     cfg = Config.load(CONFIG_PATH)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

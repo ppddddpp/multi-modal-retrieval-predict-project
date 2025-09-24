@@ -66,21 +66,30 @@ class Reranker:
         if not node2id_path.exists():
             raise FileNotFoundError(f"KG node2id.json not found at {node2id_path}")
         node2id = json.load(open(node2id_path, "r", encoding="utf8"))
-        # pick latest node embeddings
-        node_emb_files = sorted(kg_dir.glob("node_embeddings_epoch*.npy"))
-        if not node_emb_files:
-            node_emb_files = sorted(kg_dir.glob("node_embeddings*.npy"))
-        if not node_emb_files:
-            node_emb_files = sorted(kg_dir.glob("*.npy"))
-        if not node_emb_files:
-            raise FileNotFoundError("No .npy embeddings found in KG dir")
-        node_emb = np.load(node_emb_files[-1])
+
+        # prefer best checkpoint
+        best_files = sorted(kg_dir.glob("node_embeddings_best.npy"))
+        if best_files:
+            node_emb_file = best_files[-1]
+        else:
+            # fall back to epoch checkpoints
+            node_emb_files = sorted(kg_dir.glob("node_embeddings_epoch*.npy"))
+            if not node_emb_files:
+                node_emb_files = sorted(kg_dir.glob("node_embeddings*.npy"))
+            if not node_emb_files:
+                raise FileNotFoundError("No .npy embeddings found in KG dir")
+            node_emb_file = node_emb_files[-1]
+
+        node_emb = np.load(node_emb_file)
         node_emb = node_emb / (np.linalg.norm(node_emb, axis=1, keepdims=True) + 1e-12)
+
         # build id->node list
         max_idx = max(node2id.values())
         id2node = [None] * (max_idx + 1)
         for k, v in node2id.items():
             id2node[v] = k
+
+        print(f"[Reranker] loaded KG embeddings from {node_emb_file}")
         return {"node2id": node2id, "id2node": id2node, "node_emb": node_emb}
 
     # -------------------------

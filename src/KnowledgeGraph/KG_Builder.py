@@ -1,5 +1,6 @@
 from pathlib import Path
 import json, csv, re
+from tqdm import tqdm
 from typing import List, Optional, Tuple, Dict
 from DataHandler import parse_openi_xml
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
@@ -42,8 +43,10 @@ class KGBuilder:
 
     # ---------- dataset-driven triples ----------
     def build_from_parsed(self, xml_dir: str, dicom_root: str, min_label_conf: float = 0.0):
+        print("[KGBuilder] Building triples from dataset...")
         records = parse_openi_xml(xml_dir, dicom_root, combined_groups=self.combined_groups)
-        for r in records:
+
+        for r in tqdm(records, desc="Dataset records"):
             rid = f"report:{r['id']}"
             iid = f"image:{r['id']}"
             self.triples.append((rid, "REPORT_OF", iid, 1.0, "extracted"))
@@ -55,57 +58,88 @@ class KGBuilder:
                     lbl_node = f"label:{_sanitize_node(label)}"
                     self.triples.append((rid, "HAS_LABEL", lbl_node, 1.0, "extracted"))
 
+        print(f"[KGBuilder] Dataset triples added: {len(self.triples)}")
+
     # ---------- ontology mapping triples ----------
     def add_ontology_mapping(self, mapping_path: Path):
         if not mapping_path.exists():
             print(f"[KGBuilder] Mapping file not found: {mapping_path}")
             return
         mapping = json.loads(mapping_path.read_text(encoding="utf8"))
-        for group, labels in mapping.items():
+
+        for group, labels in tqdm(mapping.items(), desc=f"Ontology mapping {mapping_path.name}"):
             for label, ont in labels.items():
                 lbl_node = f"label:{_sanitize_node(label)}"
                 if ont and not str(ont).startswith("LOCAL:"):
                     ont_node = f"onto:{_sanitize_node(ont)}"
                     self.triples.append((lbl_node, "MAPPED_TO", ont_node, 1.0, "mapping"))
 
+        print(f"[KGBuilder] Mapping triples added from {mapping_path.name}: {len(self.triples)}")
+
     # ---------- ontology-native triples ----------
     def add_doid(self, doid_path: Path):
         if not doid_path.exists():
             print(f"[KGBuilder] DOID not found: {doid_path}")
             return
+
+        print(f"[KGBuilder] Parsing DOID from {doid_path.name}...")
         with doid_path.open(encoding="utf8") as f:
-            cur_id = None
-            for line in f:
-                line = line.strip()
-                if line == "[Term]":
-                    cur_id = None
-                    continue
-                if line.startswith("id: DOID:"):
-                    cur_id = line.split("id: ")[1]
-                elif line.startswith("is_a:"):
-                    parent = line.split("is_a: ")[1].split()[0]
-                    if cur_id and parent:
-                        self.triples.append((f"doid:{cur_id}", "is_a", f"doid:{parent}", 1.0, "doid"))
+            lines = f.readlines()
+
+        cur_id = None
+        for line in tqdm(lines, desc="DOID terms"):
+            line = line.strip()
+            if line == "[Term]":
+                cur_id = None
+                continue
+            if line.startswith("id: DOID:"):
+                cur_id = line.split("id: ")[1]
+            elif line.startswith("is_a:"):
+                parent = line.split("is_a: ")[1].split()[0]
+                if cur_id and parent:
+                    self.triples.append((f"doid:{cur_id}", "is_a", f"doid:{parent}", 1.0, "doid"))
+
+        print(f"[KGBuilder] DOID triples added: {len(self.triples)}")
 
     def add_radlex(self, radlex_path: Path):
         if not radlex_path.exists():
             print(f"[KGBuilder] RadLex not found: {radlex_path}")
             return
-        text = radlex_path.read_text(encoding="utf8")
-        for sub, parent in re.findall(r'rdf:about=".*?(RID\d+)".*?<rdfs:subClassOf rdf:resource=".*?(RID\d+)"', text, flags=re.S):
-            self.triples.append((f"radlex:{sub}", "is_a", f"radlex:{parent}", 1.0, "radlex"))
+
+        print(f"[KGBuilder] Parsing RadLex from {radlex_path.name}...")
+        triples_before = len(self.triples)
+
+        with radlex_path.open(encoding="utf8") as f:
+            buf = []
+            for line in tqdm(f, desc="RadLex scan"):
+                buf.append(line.strip())
+                if "</owl:Class>" in line:  # end of a class block
+                    block = " ".join(buf)
+                    buf = []
+                    sub_match = re.search(r'rdf:about=".*?(RID\d+)"', block)
+                    parent_match = re.search(r'rdfs:subClassOf rdf:resource=".*?(RID\d+)"', block)
+                    if sub_match and parent_match:
+                        sub, parent = sub_match.group(1), parent_match.group(1)
+                        self.triples.append((f"radlex:{sub}", "is_a", f"radlex:{parent}", 1.0, "radlex"))
+
+        print(f"[KGBuilder] RadLex triples added: {len(self.triples) - triples_before}")
 
     # ---------- curated CSV ----------
     def add_curated_csv(self, csv_path: str):
         p = Path(csv_path)
         if not p.exists():
             raise FileNotFoundError(csv_path)
+
+        print(f"[KGBuilder] Adding curated triples from {p.name}...")
         with p.open(newline='', encoding='utf8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                s = row['s']; r = row['r']; o = row['o']
-                conf = float(row.get('confidence', 1.0))
-                self.triples.append((s, r, o, conf, "curated"))
+            reader = list(csv.DictReader(f))
+
+        for row in tqdm(reader, desc="Curated CSV"):
+            s = row['s']; r = row['r']; o = row['o']
+            conf = float(row.get('confidence', 1.0))
+            self.triples.append((s, r, o, conf, "curated"))
+
+        print(f"[KGBuilder] Curated triples added: {len(self.triples)}")
 
     # ---------- vocab building ----------
     def _ensure_vocab(self):

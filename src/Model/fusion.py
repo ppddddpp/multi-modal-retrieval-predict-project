@@ -7,12 +7,13 @@ from safetensors.torch import load_file as load_safetensor
 from pathlib import Path
 
 try:
-    BASE_DIR = Path(__file__).resolve().parent.parent
+    BASE_DIR = Path(__file__).resolve().parent.parent.parent
 except NameError:
-    BASE_DIR = Path.cwd().parent
+    BASE_DIR = Path.cwd().parent.parent
 
 MODEL_PLACE = BASE_DIR / 'models'
-os.environ['TRANSFORMERS_CACHE'] = str(MODEL_PLACE)
+os.environ["TRANSFORMERS_CACHE"] = str(MODEL_PLACE)
+os.environ["TORCH_HOME"] = str(MODEL_PLACE)
 
 class PreFusionEnhancer(nn.Module):
     def __init__(self, dim, num_heads=4, dropout=0.1, max_len=512):
@@ -37,7 +38,11 @@ class Backbones(nn.Module):
     Outputs global image features and pooled CLS text embeddings.
     """
     def __init__(
-            self, swin_model_name='swin_base_patch4_window7_224', bert_model_name='emilyalsentzer/Bio_ClinicalBERT',
+            self, 
+            img_backbone='swin',
+            swin_model_name='swin_base_patch4_window7_224', 
+            cnn_model_name='resnet50',
+            bert_model_name='emilyalsentzer/Bio_ClinicalBERT',
             swin_checkpoint_path=None,
             bert_local_dir=None,
             pretrained=True,
@@ -47,8 +52,12 @@ class Backbones(nn.Module):
         Constructor for Backbones.
 
         Args:
+            img_backbone (str): The image backbone to use. 
+                One of 'swin' or 'cnn'. Defaults to 'swin'.
             swin_model_name (str): The Swin Transformer model name.
                 Defaults to 'swin_base_patch4_window7_224'.
+            cnn_model_name (str): The CNN model name.
+                Defaults to 'resnet50'.
             bert_model_name (str): The ClinicalBERT model name.
                 Defaults to 'emilyalsentzer/Bio_ClinicalBERT'.
             swin_checkpoint_path (str): The path to the Swin model safetensor checkpoint.
@@ -61,62 +70,159 @@ class Backbones(nn.Module):
             Defaults to 1024.
         """
         super().__init__()
-        # instantiate with random weights
-        self.swin = timm.create_model(swin_model_name, pretrained=False, in_chans=1)
-        if pretrained and swin_checkpoint_path:
-            try:
-                state = load_safetensor(str(swin_checkpoint_path), device='cpu')
-                print("[INFO] Successfully loaded Swin checkpoint:", swin_checkpoint_path)
-            except Exception as e:
-                print("[WARN] Failed to load Swin checkpoint:", e)
-                print("[INFO] Downloading pretrained Swin weights...")
-                download_swin(swin_ckpt_path=swin_checkpoint_path)
-                state = load_safetensor(str(swin_checkpoint_path), device='cpu')
-                print("[INFO] Successfully loaded Swin checkpoint after download")
+        self.img_backbone = img_backbone
 
-            # collapse 3-channel patch-embed weights to 1 channel by averaging
-            if 'patch_embed.proj.weight' in state:
-                w3 = state['patch_embed.proj.weight']  # [128, 3, 4, 4]
-                w1 = w3.mean(dim=1, keepdim=True)      # [128, 1, 4, 4]
-                state['patch_embed.proj.weight'] = w1
-            
-            # keep only keys that match
-            filtered = {k: v for k, v in state.items() if k in self.swin.state_dict()}
+        if img_backbone == "swin":
+            self.vision = timm.create_model(swin_model_name, pretrained=False, in_chans=1)
+            if pretrained and swin_checkpoint_path:
+                try:
+                    state = load_safetensor(str(swin_checkpoint_path), device="cpu")
+                    # collapse patch-embed weights
+                    if "patch_embed.proj.weight" in state:
+                        w3 = state["patch_embed.proj.weight"]
+                        w1 = w3.mean(dim=1, keepdim=True)
+                        state["patch_embed.proj.weight"] = w1
+                    filtered = {k: v for k, v in state.items() if k in self.vision.state_dict()}
+                    self.vision.load_state_dict(filtered, strict=False)
+                except Exception as e:
+                    print("[WARN] Failed to load Swin checkpoint:", e)
+                    print("[INFO] Attempting to download pretrained Swin weights...")
+                    download_swin(swin_name=swin_model_name, swin_ckpt_path=swin_checkpoint_path)
+                    state = load_safetensor(str(swin_checkpoint_path), device="cpu")
+                    filtered = {k: v for k, v in state.items() if k in self.vision.state_dict()}
+                    self.vision.load_state_dict(filtered, strict=False)
+            elif pretrained:
+                self.vision = timm.create_model(swin_model_name, pretrained=True, in_chans=1)
+            self.img_dim = self.vision.num_features
 
-            # load into swin
-            missing, unexpected = self.swin.load_state_dict(filtered, strict=False)
-            print(f"[Info] Swin loaded from {swin_checkpoint_path}, missing keys: {missing}, unexpected keys: {unexpected}")
-            
-        elif pretrained:
-            # if no local checkpoint, let timm download / cache normally
-            self.swin = timm.create_model(
-                swin_model_name,
-                pretrained=True,
-                in_chans=1,
-                checkpoint_path=str(MODEL_PLACE)
-            )
+        elif img_backbone == "cnn":
+            from torchvision import models
+            if cnn_model_name == "resnet50":
+                base = models.resnet50(pretrained=pretrained)
+                self.vision = nn.Sequential(*list(base.children())[:-1])
+                self.img_dim = base.fc.in_features
+            elif cnn_model_name == "efficientnet_b0":
+                base = models.efficientnet_b0(pretrained=pretrained)
+                self.vision = nn.Sequential(*list(base.children())[:-1])
+                self.img_dim = base.classifier[1].in_features
+            else:
+                raise ValueError(f"Unknown cnn_model_name {cnn_model_name}")
 
-        self.ln_txt2img = nn.LayerNorm(joint_dim)
-        self.ln_img2txt = nn.LayerNorm(joint_dim)
-        self.swin_features = nn.Sequential(*list(self.swin.children())[:-1])
-        self.img_dim       = self.swin.num_features
-        # load ClinicalBERT & record txt_dim
-        self.bert   = load_hf_model_or_local(bert_model_name, local_dir=bert_local_dir)
+        else:
+            raise ValueError(f"Unknown img_backbone {img_backbone}")
+        self.swin = self.vision
+        if hasattr(self.swin, "norm") and isinstance(getattr(self.swin, "norm"), nn.Module):
+            self.swin_norm = self.swin.norm
+        else:
+            # self.img_dim should have been set already
+            print("[Backbones] [WARN] Swin norm not found. Using LayerNorm.")
+            self.swin_norm = nn.LayerNorm(self.img_dim)
+        
+        # ---- Text backbone ----
+        self.bert = load_hf_model_or_local(bert_model_name, local_dir=bert_local_dir)
         self.txt_dim = self.bert.config.hidden_size
 
-    def forward(self, image, input_ids, attention_mask):
-        # image
-        patch_feats = self.swin_features(image)            # (B, H, W, C)
-        B, H, W, C = patch_feats.shape
-        patch_feats = patch_feats.reshape(B, H * W, C)     # (B, N_patches, C)
-        patch_feats = self.swin.norm(patch_feats)          # (B, N_patches, C)
-        global_feats = patch_feats.mean(dim=1)             # (B, C)
+    def swin_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Extract patch-level Swin features and return (B, H, W, C).
+        Robust to timm variants that may return different axis orders or a list of stage outputs.
+        Prefers a stage whose channel dim matches self.vision.num_features when possible.
+        """
+        model = self.swin
 
-        # text
-        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        txt_feats = outputs.last_hidden_state       
+        # get raw feats (may be tensor or list/tuple)
+        if hasattr(model, "forward_features"):
+            feats = model.forward_features(x)
+        else:
+            feats = model(x)
 
-        return (global_feats, patch_feats), txt_feats
+        # If list/tuple of stage outputs, try to pick stage with channel == vision.num_features
+        if isinstance(feats, (list, tuple)):
+            chosen = None
+            for stage in reversed(feats):  # try deeper stages first
+                if isinstance(stage, torch.Tensor) and stage.dim() == 4:
+                    # try common layout (B, C, H, W) or other orders - check for a channel match
+                    if stage.shape[1] == getattr(self.vision, "num_features", None):
+                        chosen = stage
+                        break
+                    # also check other positions
+                    if stage.shape[2] == getattr(self.vision, "num_features", None) or stage.shape[3] == getattr(self.vision, "num_features", None):
+                        chosen = stage
+                        break
+            if chosen is None:
+                chosen = feats[-1]
+            feats = chosen
+
+        # Now feats is a single tensor
+        if not isinstance(feats, torch.Tensor):
+            raise ValueError(f"Unexpected feats type: {type(feats)}")
+
+        if feats.dim() != 4:
+            # handle flattened (B, N, C)
+            if feats.dim() == 3:
+                B, N, C = feats.shape
+                G = int(N ** 0.5)
+                if G * G == N:
+                    return feats.view(B, G, G, C).contiguous()
+                pooled = feats.mean(dim=1).view(B, 1, 1, C)
+                return pooled.contiguous()
+            raise ValueError(f"Unexpected Swin feature shape: {tuple(feats.shape)}")
+
+        # feats is 4D but channels might be on any axis: find the axis equal to expected channels
+        B, d1, d2, d3 = feats.shape
+        expected_C = getattr(self.vision, "num_features", None)
+
+        # find the axis (1,2 or 3) that matches expected_C
+        ch_axis = None
+        for idx, s in enumerate((d1, d2, d3), start=1):
+            if expected_C is not None and s == expected_C:
+                ch_axis = idx
+                break
+
+        if ch_axis is None:
+            # fallback: assume (B, C, H, W) as most timm models do and convert to (B, H, W, C)
+            return feats.permute(0, 2, 3, 1).contiguous()
+
+        # build permutation that moves batch first, then the two spatial dims (in original order), then the channel axis last.
+        perm = [0] + [i for i in (1, 2, 3) if i != ch_axis] + [ch_axis]
+        feats = feats.permute(*perm).contiguous()  # now (B, H, W, C)
+        return feats
+
+    def forward(self, image, input_ids=None, attention_mask=None):
+        img_global, img_patches = None, None
+
+        if image is not None:
+            if self.img_backbone == "swin":
+                # get patch-level features (B,H,W,C) without running the vision model twice
+                patch_feats = self.swin_features(image)            # (B, H, W, C)
+                B, H, W, C = patch_feats.shape
+                patch_feats = patch_feats.view(B, H * W, C)       # (B, N_patches, C)
+                img_patches = self.swin_norm(patch_feats)         # (B, N_patches, C)
+                img_global = patch_feats.mean(dim=1)              # (B, C)
+
+            elif self.img_backbone == "cnn":
+                feats = self.vision(image)
+                if isinstance(feats, (list, tuple)):
+                    feats = feats[-1]
+
+                # For torchvision CNNs, after chopping off fc, we usually get (B, C, H, W)
+                if feats.dim() == 4:
+                    B, C, H, W = feats.shape
+                    img_global = feats.mean(dim=[2, 3])                   # (B, C)
+                    img_patches = feats.flatten(2).transpose(1, 2)        # (B, H*W, C)
+                elif feats.dim() == 2:
+                    # Already pooled to (B, D)
+                    img_global = feats
+                    img_patches = feats.unsqueeze(1)                      # (B, 1, D)
+                else:
+                    raise ValueError(f"Unexpected CNN output shape: {feats.shape}")
+
+        txt_feats = None
+        if input_ids is not None:
+            txt_feats = self.bert(input_ids=input_ids,
+                                attention_mask=attention_mask).last_hidden_state
+
+        return (img_global, img_patches), txt_feats
 
 class CrossModalFusion(nn.Module):
     """
@@ -160,6 +266,10 @@ class CrossModalFusion(nn.Module):
         self.img_patch_proj = nn.Linear(img_dim, joint_dim)
         self.img_global_proj = nn.Linear(img_dim, joint_dim)
 
+        # a learnable default pooled text token used when no text is provided
+        self.default_txt_token = nn.Parameter(torch.zeros(1, 1, txt_dim))
+        nn.init.trunc_normal_(self.default_txt_token, std=0.02)
+
         self.use_cls_only = use_cls_only
         self.comb_mlp = nn.Sequential(
             nn.Linear(joint_dim * 3, joint_dim),
@@ -182,6 +292,11 @@ class CrossModalFusion(nn.Module):
             torch.Tensor: The fused features of shape (B, joint_dim).
             dict: A dictionary containing the attention weights if return_attention is True.
         """
+        if txt_feats is None:
+            # repeat the learnable default token for the batch
+            B = img_global.shape[0] if img_global is not None else img_patch.shape[0]
+            txt_feats = self.default_txt_token.expand(B, -1, -1).to(img_patch.device if img_patch is not None else (img_global.device if img_global is not None else 'cpu'))
+        
         # img_global: (B, joint_dim)
         # img_patch:  (B, N_patches, img_dim)
         # txt_feats:  (B, txt_dim)

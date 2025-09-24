@@ -560,22 +560,42 @@ def make_attention_maps(
         # ensure returned structure exists even on error
         return out
 
-def kg_alignment_loss(joint_emb, batch_ids, kg_embs, node2id, trainer, loss_type="cosine"):
+def kg_alignment_loss(joint_emb, batch_ids, kg_embs, node2id, trainer, labels=None, label_cols=None, loss_type="cosine"):
     """
     Align joint embeddings with KG embeddings.
-    Uses trainer.proj_to_kg to map joint_emb -> KG embedding space.
+    - First tries explicit 'report:{id}' node
+    - If missing, falls back to average of its label-based KG nodes
+    - If no mapping exists, falls back to zero vector
     """
     if joint_emb.device != kg_embs.device:
         kg_embs = kg_embs.to(joint_emb.device)
 
-    # collect KG embeddings for each id
     kg_vecs = []
-    for id_ in batch_ids:
+    for i, id_ in enumerate(batch_ids):
         node_key = f"report:{id_}"
         if node_key in node2id:
+            # direct mapping
             kg_vecs.append(kg_embs[node2id[node_key]])
         else:
+            # try label-based fallback
+            if labels is not None and label_cols is not None:
+                if i < len(labels):  # safety check
+                    label_vec = labels[i].cpu().numpy()
+                    pos_labels = [label_cols[j] for j, v in enumerate(label_vec) if v > 0.5]
+
+                    label_embs = []
+                    for lab in pos_labels:
+                        lab_key = f"label:{lab}"
+                        if lab_key in node2id:
+                            label_embs.append(kg_embs[node2id[lab_key]])
+
+                    if len(label_embs) > 0:
+                        kg_vecs.append(torch.stack(label_embs).mean(dim=0))
+                        continue  # done with fallback
+
+            # if no report node and no labels mapped
             kg_vecs.append(torch.zeros_like(kg_embs[0]))
+
     kg_vecs = torch.stack(kg_vecs).to(joint_emb.device)
 
     # project joint_emb into KG space

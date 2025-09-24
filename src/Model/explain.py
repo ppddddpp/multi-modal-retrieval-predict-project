@@ -27,6 +27,12 @@ class ExplanationEngine:
         self.image_size      = image_size
         self.ig_steps        = ig_steps
         self.device = device
+        if fusion_model is not None:
+            self.image_proj = torch.nn.Linear(fusion_model.embed_dim, classifier_head[0].in_features).to(device)
+            self.text_proj  = torch.nn.Linear(fusion_model.embed_dim, classifier_head[0].in_features).to(device)
+        else:
+            self.image_proj = None
+            self.text_proj  = None
 
     def avg_heads(self, att):
         """
@@ -165,7 +171,9 @@ class ExplanationEngine:
                                     img_global: torch.Tensor,
                                     img_patches: torch.Tensor,
                                     txt_feats: torch.Tensor,
-                                    target_idx: int) -> np.ndarray:
+                                    target_idx: int,
+                                    unimodal: str = None
+                                    ) -> np.ndarray:
         """
         Compute Grad-CAM explanation map for a single input.
 
@@ -182,6 +190,51 @@ class ExplanationEngine:
             - Currently only supports batch size 1.
             - The returned map is normalized to [0,1] per sample.
         """
+        device = self.device
+
+        # -------- IMAGE ONLY --------
+        if unimodal == "image":
+            if img_patches is None:
+                raise ValueError("Image-only mode requires img_patches")
+            img_patches = img_patches.clone().detach().to(device).requires_grad_(True)
+            img_global  = img_patches.mean(dim=1)
+
+            # projection head for image-only
+            feat = self.image_proj(img_global)
+            logits = self.classifier_head(feat)
+
+            target_score = logits[:, int(target_idx)].sum()
+            grads = torch.autograd.grad(target_score, img_patches)[0]
+            cam = (grads * img_patches).sum(dim=-1)
+            cam = torch.relu(cam)
+
+            # reshape + upscale
+            B, Np = cam.shape
+            G = int(np.sqrt(Np))
+            cam_grid = cam.view(B, G, G).unsqueeze(1)  # (B,1,G,G)
+            cam_up = F.interpolate(cam_grid, size=self.image_size, mode="bilinear", align_corners=False)
+            out_map = cam_up.squeeze().detach().cpu().numpy()
+            return (out_map - out_map.min()) / (out_map.max() - out_map.min() + 1e-8)
+
+        # -------- TEXT ONLY --------
+        if unimodal == "text":
+            if txt_feats is None:
+                raise ValueError("Text-only mode requires txt_feats")
+            txt_feats = txt_feats.clone().detach().to(device).requires_grad_(True)
+
+            # projection head for text-only (mean pooling or CLS)
+            feat = self.text_proj(txt_feats.mean(dim=1))
+            logits = self.classifier_head(feat)
+
+            target_score = logits[:, int(target_idx)].sum()
+            grads = torch.autograd.grad(target_score, txt_feats)[0]
+            token_importance = (grads * txt_feats).sum(dim=-1).relu()  # (B, T)
+
+            token_norm = (token_importance - token_importance.min(dim=1, keepdim=True)[0]) / \
+                        (token_importance.max(dim=1, keepdim=True)[0] - token_importance.min(dim=1, keepdim=True)[0] + 1e-8)
+            return token_norm[0].detach().cpu().numpy()  # (T,)
+
+        # -------- MULTIMODAL (default) --------
         # Move to device and ensure patches require grad
         device = getattr(self, "device", img_patches.device)
         img_patches = img_patches.clone().detach().to(device).requires_grad_(True)  # (B,Np,E)
@@ -244,7 +297,16 @@ class ExplanationEngine:
         out_map = np.nan_to_num(out_map, nan=0.0, posinf=1.0, neginf=0.0)
         return out_map
 
-    def compute_ig_map_for_target(self, img_global, img_patches, txt_feats, target_idx, steps=50, internal_batch_size=1):
+    def compute_ig_map_for_target(
+        self,
+        img_global=None,
+        img_patches=None,
+        txt_feats=None,
+        target_idx=0,
+        steps=50,
+        internal_batch_size=1,
+        unimodal: str = None
+    ):
         """
         Computes an Integrated Gradients heatmap over image patches for a single target class.
 
@@ -259,6 +321,54 @@ class ExplanationEngine:
         Returns:
             (H, W) numpy heatmap for the first item in batch normalized to [0,1]
         """
+        device = self.device
+        # -------- IMAGE ONLY --------
+        if unimodal == "image":
+            if img_patches is None:
+                raise ValueError("Image-only IG requires img_patches")
+            img_patches = img_patches.clone().detach().to(device).requires_grad_(True)
+
+            ig = IntegratedGradients(lambda ip: self.classifier_head(self.image_proj(ip.mean(dim=1))))
+            baselines = torch.zeros_like(img_patches, device=device)
+
+            attributions = ig.attribute(
+                inputs=img_patches,
+                baselines=baselines,
+                n_steps=steps,
+                internal_batch_size=internal_batch_size,
+                target=int(target_idx)
+            )  # (B, Np, E)
+
+            att = attributions.norm(p=1, dim=-1)  # (B, Np)
+            G = int(np.sqrt(att.size(1)))
+            att = att.view(-1, G, G)
+            att = (att - att.min()) / (att.max() - att.min() + 1e-8)
+
+            return self.upscale_heatmap(att[0].detach().cpu().numpy(), target_size=self.image_size)
+
+        # -------- TEXT ONLY --------
+        if unimodal == "text":
+            if txt_feats is None:
+                raise ValueError("Text-only IG requires txt_feats")
+            txt_feats = txt_feats.clone().detach().to(device).requires_grad_(True)
+
+            ig = IntegratedGradients(lambda t: self.classifier_head(self.text_proj(t.mean(dim=1))))
+            baselines = torch.zeros_like(txt_feats, device=device)
+
+            attributions = ig.attribute(
+                inputs=txt_feats,
+                baselines=baselines,
+                n_steps=steps,
+                internal_batch_size=internal_batch_size,
+                target=int(target_idx)
+            )  # (B, T, E)
+
+            token_scores = attributions.norm(p=1, dim=-1)  # (B, T)
+            token_scores = (token_scores - token_scores.min(dim=1, keepdim=True)[0]) / \
+                        (token_scores.max(dim=1, keepdim=True)[0] - token_scores.min(dim=1, keepdim=True)[0] + 1e-8)
+            return token_scores[0].detach().cpu().numpy()  # (T,)
+        
+        # -------- MULTIMODAL (default) --------
         img_patches = img_patches.clone().detach().to(self.device).requires_grad_(True)
         txt_feats   = txt_feats.clone().detach().to(self.device)
 
@@ -466,7 +576,7 @@ class ExplanationEngine:
             try:
                 if att_comb is not None:
                     # collapse heads: want [B, Lq, Lk] or [B, Lk]
-                    att_tmp = self.avg_heads(att_comb)  # you already have this helper
+                    att_tmp = self.avg_heads(att_comb)
                     if debug:
                         print("[DBG compute_comb_token_vector] avg_heads ->", getattr(att_tmp, "shape", None))
 
@@ -489,10 +599,6 @@ class ExplanationEngine:
 
                     # stable softmax
                     att_tok = torch.nn.functional.softmax(att_tok, dim=-1)  # [B, T]
-                    # weighted sum over tokens -> (B, E) (useable if needed)
-                    # tok_emb = txt_feats  # (B, T, E)
-                    # comb_tok_vec = torch.einsum('bt,bte->be', att_tok, tok_emb)
-                    # but we want a token map -> return att_tok as [B,1,T]
                     t_from_comb = att_tok.unsqueeze(1)
                     if debug:
                         print("[DBG compute_comb_token_vector] recomputed att_tok ->", t_from_comb.shape)
@@ -865,4 +971,44 @@ class ExplanationEngine:
             "attention_map": attention_maps,
             "ig_maps": ig_maps,
             "gradcam_maps": gradcam_maps
+        }
+    
+    def explain_image_only(self, img_global, img_patches, targets):
+        if isinstance(targets, int):
+            targets = [targets]
+
+        gradcam_maps, ig_maps = {}, {}
+        for t in targets:
+            gradcam_maps[t] = self.compute_gradcam_map_for_target(
+                img_global, img_patches, txt_feats=None, target_idx=t, unimodal="image"
+            )
+            ig_maps[t] = self.compute_ig_map_for_target(
+                img_global, img_patches, txt_feats=None, target_idx=t, unimodal="image"
+            )
+
+        return {
+            "attention_map": None,  # not relevant in unimodal
+            "ig_maps": ig_maps,
+            "gradcam_maps": gradcam_maps
+        }
+
+    def explain_text_only(self, txt_feats, targets):
+        if isinstance(targets, int):
+            targets = [targets]
+
+        ig_maps, gradcam_maps = {}, {}
+        for t in targets:
+            ig_maps[t] = self.compute_ig_map_for_target(
+                img_global=None, img_patches=None, txt_feats=txt_feats, 
+                target_idx=t, unimodal="text"
+            )
+            gradcam_maps[t] = self.compute_gradcam_map_for_target(
+                img_global=None, img_patches=None, txt_feats=txt_feats, 
+                target_idx=t, unimodal="text"
+            )
+
+        return {
+            "attention_map": None,   # not relevant in unimodal text
+            "ig_maps": ig_maps,      # dict[target -> token IG scores]
+            "gradcam_maps": gradcam_maps  # dict[target -> token Grad-CAM scores]
         }

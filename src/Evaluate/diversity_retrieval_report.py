@@ -19,7 +19,7 @@ from Model import MultiModalRetrievalModel
 from DataHandler import DICOMImagePreprocessor
 from LabelData import normal_groups, disease_groups, finding_groups, symptom_groups
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 OUT_DIR = BASE_DIR / "retrieval_diversity_score" / "retrieval_reports"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 OVERLAY_DIR = OUT_DIR / "overlays"

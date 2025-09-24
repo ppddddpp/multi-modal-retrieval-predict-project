@@ -1,4 +1,4 @@
-Data folder should follow:
+Data folder idealy should follow:
 
 data
 ├── openi

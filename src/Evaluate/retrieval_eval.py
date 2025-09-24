@@ -12,7 +12,7 @@ from DataHandler import parse_openi_xml, build_dataloader
 from retrieval_metrics import precision_at_k, mean_average_precision, mean_reciprocal_rank
 from LabelData import disease_groups, normal_groups
 
-BASE_DIR    = Path(__file__).resolve().parent.parent
+BASE_DIR    = Path(__file__).resolve().parent.parent.parent
 CONFIG_PATH = BASE_DIR / "configs" / "config.yaml"
 EMBED_DIR   = BASE_DIR / "embeddings"
 GT_DIR      = BASE_DIR / "ground_truths"

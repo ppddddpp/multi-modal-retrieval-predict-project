@@ -7,7 +7,7 @@ from .explain import ExplanationEngine
 import numpy as np
 import json
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 EMBEDDINGS_DIR = BASE_DIR / "embeddings"
 
 class MultiHeadMLP(nn.Module):
@@ -72,7 +72,9 @@ class MultiModalRetrievalModel(nn.Module):
         num_classes:  int = 22,
         num_fusion_layers: int = 3,
         fusion_type:  str = "cross",
+        img_backbone: str = "swin",
         swin_name:    str = "swin_base_patch4_window7_224",
+        cnn_name: str = "resnet50",
         bert_name:    str = "emilyalsentzer/Bio_ClinicalBERT",
         swin_ckpt_path:    str = None,
         bert_local_dir:   str = None,
@@ -82,6 +84,7 @@ class MultiModalRetrievalModel(nn.Module):
         training:      bool = False,
         use_shared_ffn: bool = True,
         use_cls_only: bool = False,
+        model_type: str = "multimodal",
         retriever: RetrievalEngine = None
     ):
         """
@@ -91,7 +94,9 @@ class MultiModalRetrievalModel(nn.Module):
         :param num_fusion_layers: number of fusion layers to use
         :param use_shared_ffn: whether to use a shared FFN across fusion layers
         :param fusion_type: type of fusion module to use; one of "cross", "simple", "gated"
+        :param img_backbone: type of image backbone to use; one of "swin", "cnn"
         :param swin_name: name of the Swin transformer model to use
+        :param cnn_name: name of the CNN model to use
         :param bert_name: name of the ClinicalBERT model to use
         :param swin_ckpt_path: path to a Swin transformer checkpoint to load
         :param bert_local_dir: directory containing a ClinicalBERT model to load
@@ -100,6 +105,7 @@ class MultiModalRetrievalModel(nn.Module):
         :param device: device to run the model on
         :param training: whether the model is being trained or used for inference
         :param use_cls_only: whether to use only the CLS token for BERT
+        :param model_type: type of model to use; one of "multimodal", "image", "text"
         :param retriever: optional retrieval engine for case-based retrieval
 
         Args:
@@ -109,7 +115,9 @@ class MultiModalRetrievalModel(nn.Module):
             use_shared_ffn (bool, optional): whether to use a shared FFN across fusion layers. Defaults to True.
             num_fusion_layers (int, optional): number of fusion layers to use. Defaults to 3.
             fusion_type (str, optional): type of fusion module to use; one of "cross", "simple", "gated". Defaults to "cross".
+            img_backbone (str, optional): type of image backbone to use; one of "swin", "cnn". Defaults to "swin".
             swin_name (str, optional): name of the Swin transformer model to use. Defaults to "swin_base_patch4_window7_224".
+            cnn_name (str, optional): name of the CNN model to use. Defaults to "resnet50".
             bert_name (str, optional): name of the ClinicalBERT model to use. Defaults to "emilyalsentzer/Bio_ClinicalBERT".
             swin_ckpt_path (str, optional): path to a Swin transformer checkpoint to load. Defaults to None.
             bert_local_dir (str, optional): directory containing a ClinicalBERT model to load. Defaults to None.
@@ -118,6 +126,7 @@ class MultiModalRetrievalModel(nn.Module):
             device (torch.device, optional): device to run the model on. Defaults to torch.device("cpu").
             training (bool, optional): whether the model is being trained or used for inference. Defaults to False.
             use_cls_only (bool, optional): whether to use only the CLS token for BERT. Defaults to False.
+            model_type (str, optional): type of model to use; one of "multimodal", "image", "text". Defaults to "multimodal".
             retriever (RetrievalEngine, optional): optional retrieval engine for case-based retrieval. Defaults to None.
         """
         super().__init__()
@@ -125,7 +134,9 @@ class MultiModalRetrievalModel(nn.Module):
         self.use_shared_ffn = use_shared_ffn
         # instantiate vision+text backbones
         self.backbones = Backbones(
+            img_backbone       = img_backbone,
             swin_model_name    = swin_name,
+            cnn_model_name     = cnn_name,
             bert_model_name    = bert_name,
             swin_checkpoint_path = swin_ckpt_path,
             bert_local_dir       = bert_local_dir,
@@ -133,6 +144,12 @@ class MultiModalRetrievalModel(nn.Module):
         ).to(device)
         img_dim = self.backbones.img_dim
         txt_dim = self.backbones.txt_dim
+        
+        # set up model type
+        if model_type in ["multimodal", "image", "text"]:
+            self.model_type = model_type
+        else:
+            raise ValueError(f"Unknown model_type {model_type!r}")
 
         # set up fusion
         if fusion_type == "cross":
@@ -172,6 +189,10 @@ class MultiModalRetrievalModel(nn.Module):
         self.drop_path_layers = nn.ModuleList([
             StochasticDepth(0.1) for _ in range(num_fusion_layers)
         ])
+
+        # Projection for image and text embeddings only case
+        self.img_proj = nn.Linear(img_dim, joint_dim).to(device)
+        self.txt_proj = nn.Linear(txt_dim, joint_dim).to(device)
 
         # adapters for each fusion layer
         self.adapters = nn.ModuleList([
@@ -254,100 +275,119 @@ class MultiModalRetrievalModel(nn.Module):
         logits (torch.Tensor): (B, num_classes)
         dict: attn_weights (only if return_attention=True)
         """
-        (img_global, img_patches), txt_feats = self.backbones(
-            image.to(self.device),
-            input_ids.to(self.device),
-            attention_mask.to(self.device)
-        )
-
         attn_weights = {}
         joint_emb = None
 
-        for i, fusion in enumerate(self.fusion_layers):
-            # fusion may return either pooled (B, D) or sequence (B, L, D)
-            fused_out, attn_from_fusion = fusion(
-                img_global,
-                img_patches,
-                txt_feats,
-                return_attention=return_attention
-            )
+        # --- Backbones ---
+        (img_global, img_patches), txt_feats = self.backbones(
+            image.to(self.device) if image is not None else None,
+            input_ids.to(self.device) if input_ids is not None else None,
+            attention_mask.to(self.device) if attention_mask is not None else None
+        )
+        
+        if self.model_type == "multimodal":
+            for i, fusion in enumerate(self.fusion_layers):
+                # fusion may return either pooled (B, D) or sequence (B, L, D)
+                fused_out, attn_from_fusion = fusion(
+                    img_global,
+                    img_patches,
+                    txt_feats,
+                    return_attention=return_attention
+                )
 
-            # Handling fuse output 
-            if fused_out is None:
-                raise RuntimeError("Fusion returned None fused_out")
-            if fused_out.dim() == 3:
-                seq = fused_out  # (B, L, D)
-            elif fused_out.dim() == 2:
-                seq = fused_out.unsqueeze(1)  # (B, 1, D)
-            else:
-                raise RuntimeError(f"Unexpected fused_out shape: {fused_out.shape}")
+                # Handling fuse output 
+                if fused_out is None:
+                    raise RuntimeError("Fusion returned None fused_out")
+                if fused_out.dim() == 3:
+                    seq = fused_out  # (B, L, D)
+                elif fused_out.dim() == 2:
+                    seq = fused_out.unsqueeze(1)  # (B, 1, D)
+                else:
+                    raise RuntimeError(f"Unexpected fused_out shape: {fused_out.shape}")
 
-            # dropout + positional encoding (seq: B,L,D)
-            seq = self.dropout(seq)
-            seq = self.pos_encoder(seq)
+                # dropout + positional encoding (seq: B,L,D)
+                seq = self.dropout(seq)
+                seq = self.pos_encoder(seq)
 
-            seq_out, comb_attn_weights = self.self_attn(seq, seq, seq)
+                seq_out, comb_attn_weights = self.self_attn(seq, seq, seq)
 
-            # store comb & fusion attn weights (detach -> cpu to avoid keeping graph)
-            if return_attention:
-                try:
-                    attn_weights[f"layer_{i}_comb"] = comb_attn_weights.detach().cpu()
-                except Exception:
-                    # comb_attn_weights may be None or not a tensor (guard)
-                    attn_weights[f"layer_{i}_comb"] = comb_attn_weights
+                # store comb & fusion attn weights (detach -> cpu to avoid keeping graph)
+                if return_attention:
+                    try:
+                        attn_weights[f"layer_{i}_comb"] = comb_attn_weights.detach().cpu()
+                    except Exception:
+                        # comb_attn_weights may be None or not a tensor (guard)
+                        attn_weights[f"layer_{i}_comb"] = comb_attn_weights
 
-                # fusion produced cross-attention dict (txt2img/img2txt) — store if present
-                if attn_from_fusion:
-                    if "txt2img" in attn_from_fusion and attn_from_fusion["txt2img"] is not None:
-                        try:
-                            attn_weights[f"layer_{i}_txt2img"] = attn_from_fusion["txt2img"].detach().cpu()
-                        except Exception:
-                            attn_weights[f"layer_{i}_txt2img"] = attn_from_fusion["txt2img"]
-                    if "img2txt" in attn_from_fusion and attn_from_fusion["img2txt"] is not None:
-                        try:
-                            attn_weights[f"layer_{i}_img2txt"] = attn_from_fusion["img2txt"].detach().cpu()
-                        except Exception:
-                            attn_weights[f"layer_{i}_img2txt"] = attn_from_fusion["img2txt"]
-                    # optional extras (patch_avg etc.)
-                    if "patch_avg" in attn_from_fusion:
-                        try:
-                            attn_weights[f"layer_{i}_patch_avg"] = attn_from_fusion["patch_avg"].detach().cpu()
-                        except Exception:
-                            attn_weights[f"layer_{i}_patch_avg"] = attn_from_fusion["patch_avg"]
+                    # fusion produced cross-attention dict (txt2img/img2txt) — store if present
+                    if attn_from_fusion:
+                        if "txt2img" in attn_from_fusion and attn_from_fusion["txt2img"] is not None:
+                            try:
+                                attn_weights[f"layer_{i}_txt2img"] = attn_from_fusion["txt2img"].detach().cpu()
+                            except Exception:
+                                attn_weights[f"layer_{i}_txt2img"] = attn_from_fusion["txt2img"]
+                        if "img2txt" in attn_from_fusion and attn_from_fusion["img2txt"] is not None:
+                            try:
+                                attn_weights[f"layer_{i}_img2txt"] = attn_from_fusion["img2txt"].detach().cpu()
+                            except Exception:
+                                attn_weights[f"layer_{i}_img2txt"] = attn_from_fusion["img2txt"]
+                        # optional extras (patch_avg etc.)
+                        if "patch_avg" in attn_from_fusion:
+                            try:
+                                attn_weights[f"layer_{i}_patch_avg"] = attn_from_fusion["patch_avg"].detach().cpu()
+                            except Exception:
+                                attn_weights[f"layer_{i}_patch_avg"] = attn_from_fusion["patch_avg"]
 
-            if self.use_cls_only:
-                fused = fused_out[:, 0, :]
-            else:
-                fused = seq_out.mean(dim=1)
+                if self.use_cls_only:
+                    fused = fused_out[:, 0, :]
+                else:
+                    fused = seq_out.mean(dim=1)
 
-            # Residual
-            if i == 0:
-                x = fused
-            else:
-                x = self.norm1_layers[i](joint_emb)
-                x = self.drop_path_layers[i](x, self.alpha * fused)
+                # Residual
+                if i == 0:
+                    x = fused
+                else:
+                    x = self.norm1_layers[i](joint_emb)
+                    x = self.drop_path_layers[i](x, self.alpha * fused)
 
-            # FFN + Adapter
-            x_ffn = self.norm2_layers[i](x)
-            if self.use_shared_ffn:
-                x = x + self.shared_ffn(x_ffn)
-            else:
-                x = x + self.ffn[i](x_ffn)
-            x = x + self.adapters[i](x)
+                # FFN + Adapter
+                x_ffn = self.norm2_layers[i](x)
+                if self.use_shared_ffn:
+                    x = x + self.shared_ffn(x_ffn)
+                else:
+                    x = x + self.ffn[i](x_ffn)
+                x = x + self.adapters[i](x)
 
-            # Update joint_emb
+                # Update joint_emb
+                joint_emb = x
+
+            # After loop, ensure joint_emb is (B, D)
+            if joint_emb is None:
+                raise RuntimeError("joint_emb is still None after forward")
+            if joint_emb.dim() == 3:
+                # if singleton seq dim (B,1,D) -> squeeze; otherwise mean-pool tokens
+                if joint_emb.size(1) == 1:
+                    joint_emb = joint_emb.squeeze(1)
+                else:
+                    joint_emb = joint_emb.mean(dim=1)
+
+        # --- Image-only ---
+        elif self.model_type == "image":
+            x = img_global  # (B, D_img)
+            x = self.img_proj(x)  # nn.Linear(img_dim, joint_dim)
+            x = self.shared_ffn(x) if self.use_shared_ffn else self.ffn[0](x)
             joint_emb = x
 
-        # After loop, ensure joint_emb is (B, D)
-        if joint_emb is None:
-            raise RuntimeError("joint_emb is still None after forward")
-        if joint_emb.dim() == 3:
-            # if singleton seq dim (B,1,D) -> squeeze; otherwise mean-pool tokens
-            if joint_emb.size(1) == 1:
-                joint_emb = joint_emb.squeeze(1)
+        # --- Text-only ---
+        elif self.model_type == "text":
+            if self.use_cls_only:
+                x = txt_feats[:, 0, :]  # CLS
             else:
-                joint_emb = joint_emb.mean(dim=1)
-
+                x = txt_feats.mean(dim=1)  # mean pool
+            x = self.txt_proj(x)  # nn.Linear(txt_dim, joint_dim)
+            x = self.shared_ffn(x) if self.use_shared_ffn else self.ffn[0](x)
+            joint_emb = x
+        
         logits = self.classifier(joint_emb)
 
         return joint_emb, logits, (attn_weights if return_attention else None)
@@ -381,12 +421,46 @@ class MultiModalRetrievalModel(nn.Module):
         }
 
         if explain:
-            expl = self.explain(
-                image, input_ids, attention_mask,
-                joint_emb, attn_weights,
-                targets=topk_idx[0].tolist(),
-                K=K
-            )
+            targets = topk_idx[0].tolist()
+
+            if self.model_type == "multimodal":
+                expl = self.explain(
+                    image, input_ids, attention_mask,
+                    joint_emb, attn_weights,
+                    targets=targets,
+                    K=K
+                )
+            elif self.model_type == "image":
+                # no attention/text branch
+                (img_global, img_patches), _ = self.backbones(
+                    image.to(self.device),
+                    None, None
+                )
+                expl = self.explain_image_only(img_global, img_patches, targets)
+                # add retrieval to keep schema consistent
+                retr_ids, retr_dists = self.retriever.retrieve(q_emb, K=K)
+                expl.update({
+                    "retrieval_ids": retr_ids,
+                    "retrieval_dists": retr_dists,
+                    "attention_map": None,   # not applicable
+                })
+            elif self.model_type == "text":
+                _, txt_feats = self.backbones(
+                    None,
+                    input_ids.to(self.device),
+                    attention_mask.to(self.device)
+                )
+                expl = self.explain_text_only(txt_feats, targets)
+                retr_ids, retr_dists = self.retriever.retrieve(q_emb, K=K)
+                expl.update({
+                    "retrieval_ids": retr_ids,
+                    "retrieval_dists": retr_dists,
+                    "attention_map": None,   # not applicable
+                    "gradcam_maps": None,    # not applicable
+                })
+            else:
+                raise ValueError(f"Unsupported model_type: {self.model_type}")
+
             output.update(expl)
 
         return output
@@ -510,4 +584,49 @@ class MultiModalRetrievalModel(nn.Module):
             'attention_map':   maps['attention_map'],
             'ig_maps':         maps['ig_maps'],
             'gradcam_maps':      maps['gradcam_maps']
+        }
+    
+    def explain_image_only(self, img_global, img_patches, targets, K=5):
+        if self.explainer is None:
+            self.explainer = ExplanationEngine(
+                fusion_model=None,            # no fusion in image-only
+                classifier_head=self.classifier,
+                image_size=self.image_size,
+                ig_steps=self.ig_steps,
+                device=self.device
+            )
+
+        # Get explanation maps for image branch only
+        maps = self.explainer.explain_image_only(
+            img_global=img_global,
+            img_patches=img_patches,
+            targets=targets
+        )
+
+        return {
+            "attention_map": None,        # not applicable in single modality
+            "ig_maps": maps["ig_maps"],   # from ExplanationEngine
+            "gradcam_maps": maps["gradcam_maps"]
+        }
+
+    def explain_text_only(self, txt_feats, targets, K=5):
+        if self.explainer is None:
+            self.explainer = ExplanationEngine(
+                fusion_model=None,             # no fusion in text-only
+                classifier_head=self.classifier,
+                image_size=self.image_size,
+                ig_steps=self.ig_steps,
+                device=self.device
+            )
+
+        # Get explanation maps for text branch only
+        maps = self.explainer.explain_text_only(
+            txt_feats=txt_feats,
+            targets=targets
+        )
+
+        return {
+            "attention_map": None,        # not applicable
+            "ig_maps": maps["ig_maps"],   # token-level attribution
+            "gradcam_maps": maps["gradcam_maps"] # token-level Grad-CAM
         }

@@ -124,52 +124,47 @@ class KGTransETrainer:
             normalize: bool = True,
             save_every: int = 1,
             wandb_config: Optional[dict] = None,
-            log_to_wandb: bool = True):
+            log_to_wandb: bool = True,
+            patience: Optional[int] = None,    # NEW: early stopping patience
+            metric: str = "mrr"                # NEW: which metric to monitor
+            ):
         """
         Train KG TransE embeddings.
 
-        Robust wandb handling:
-        - Initializes wandb only if requested and no active run exists.
-        - Tracks whether this method started wandb and only finishes if so.
-        - Falls back to disabling wandb on init/log errors (graceful).
+        - Supports optional early stopping with patience.
+        - Saves best checkpoint (by chosen metric).
+        - Robust wandb handling.
         """
         if self.model is None:
             raise RuntimeError("Call load_triples() first.")
 
-        # compute steps so we include remainder batch
         n = len(self.pos_s)
         steps = max(1, (n + batch_size - 1) // batch_size)
 
         # wandb init bookkeeping
         started_wandb = False
-
         if log_to_wandb:
             try:
-                # safe check whether a run exists
                 if getattr(wandb, "run", None) is None:
-                    run_name = None
-                    if wandb_config and "name" in wandb_config:
-                        run_name = wandb_config.get("name")
-                    else:
-                        run_name = f"kg_train_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
+                    run_name = wandb_config.get("name") if wandb_config and "name" in wandb_config \
+                            else f"kg_train_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     init_kwargs = {
                         "project": wandb_config.get("project", "multi-modal-kg") if wandb_config else "multi-modal-kg",
                         "name": run_name,
                         "config": wandb_config if wandb_config else None,
                         "reinit": True,
                     }
-
-                    # respect explicit offline mode if set via env or config
                     if os.environ.get("WANDB_MODE") == "offline" or (wandb_config and wandb_config.get("mode") == "offline"):
                         init_kwargs["mode"] = "offline"
-
                     wandb.init(**init_kwargs)
                     started_wandb = True
             except Exception as e:
-                # fail gracefully: print warning and disable logging
                 print(f"[WARN] wandb.init() failed — disabling wandb logging: {e}")
                 log_to_wandb = False
+
+        # early stopping bookkeeping
+        best_val = -float("inf")
+        bad_epochs = 0
 
         for epoch in tqdm(range(1, epochs + 1), desc="KG Train", unit="epoch"):
             idxs = np.arange(n)
@@ -177,11 +172,10 @@ class KGTransETrainer:
             epoch_loss = 0.0
 
             for step in tqdm(range(steps), desc=f"Epoch {epoch}/{epochs}", unit="batch", leave=False):
-                # compute batch slice (last batch may be smaller)
                 start = step * batch_size
                 end = min((step + 1) * batch_size, n)
                 if start >= end:
-                    continue  # defensive
+                    continue
                 batch_idx = idxs[start:end]
 
                 s_batch = torch.LongTensor(self.pos_s[batch_idx]).to(self.device)
@@ -192,7 +186,7 @@ class KGTransETrainer:
                 # positive scores
                 pos_scores = self.model.score(s_batch, r_batch, o_batch)
 
-                # negative sampling (corrupt head or tail)
+                # negative sampling
                 corrupt_head = np.random.rand(len(batch_idx)) < 0.5
                 neg_s = self.pos_s[batch_idx].copy()
                 neg_o = self.pos_o[batch_idx].copy()
@@ -204,7 +198,7 @@ class KGTransETrainer:
 
                 neg_scores = self.model.score(neg_s_t, r_batch, neg_o_t)
 
-                # margin ranking loss (element-wise relu)
+                # margin ranking loss
                 loss_sample = torch.relu(pos_scores + self.margin - neg_scores)
                 loss = (loss_sample * conf_batch).mean()
 
@@ -226,6 +220,7 @@ class KGTransETrainer:
             # prepare logging payload
             log_data = {"kg/epoch": epoch, "kg/loss": avg_loss}
 
+            # evaluate
             if hasattr(self, "val_triples") and len(self.val_triples) > 0:
                 try:
                     mrr, hits1, hits10 = self.evaluate(self.val_triples, k=10)
@@ -235,6 +230,19 @@ class KGTransETrainer:
                         "kg/val_hits1": hits1,
                         "kg/val_hits10": hits10,
                     })
+
+                    # early stopping
+                    val_score = {"mrr": mrr, "hits1": hits1, "hits10": hits10}[metric]
+                    if val_score > best_val:
+                        best_val = val_score
+                        bad_epochs = 0
+                        self.save_embeddings(suffix="best")
+                    else:
+                        bad_epochs += 1
+                        if patience and bad_epochs >= patience:
+                            print(f"[EarlyStop] No improvement in {patience} epochs. Stopping at epoch {epoch}.")
+                            break
+
                 except Exception as e:
                     print(f"[WARN] evaluation failed: {e}")
 
@@ -250,7 +258,6 @@ class KGTransETrainer:
                 except Exception as e:
                     print(f"[WARN] save_embeddings failed: {e}")
 
-        # finish wandb only if we started it here
         if started_wandb and getattr(wandb, "run", None) is not None:
             try:
                 wandb.finish()

@@ -74,6 +74,7 @@ num_fusion_layers= cfg.num_fusion_layers
 use_shared_ffn = cfg.use_shared_ffn
 text_dim = cfg.text_dim
 use_cls_only = cfg.use_cls_only
+image_backbone = cfg.image_backbone
 
 # --- Wandb ---
 project_name = cfg.project_name
@@ -205,10 +206,30 @@ if __name__ == '__main__':
         print("Using cached KG embeddings")
 
 
-    kg_embs = np.load(BASE_DIR / "knowledge_graph" / "node_embeddings.npy")
+    # --- Load best KG embeddings ---
+    kg_dir = BASE_DIR / "knowledge_graph"
+
+    # prefer best checkpoint
+    best_node_path = kg_dir / "node_embeddings_best.npy"
+    best_rel_path  = kg_dir / "rel_embeddings_best.npy"
+
+    if best_node_path.exists():
+        node_emb_path = best_node_path
+    else:
+        # fallback to generic / epoch embeddings
+        candidates = sorted(kg_dir.glob("node_embeddings_epoch*.npy"))
+        if not candidates:
+            candidates = sorted(kg_dir.glob("node_embeddings*.npy"))
+        if not candidates:
+            raise FileNotFoundError("No node_embeddings found in knowledge_graph/")
+        node_emb_path = candidates[-1]
+
+    print(f"[Train] Using KG embeddings from {node_emb_path}")
+    kg_embs = np.load(node_emb_path)
     kg_embs = torch.tensor(kg_embs, dtype=torch.float32, device=device)
 
-    with open(BASE_DIR / "knowledge_graph" / "node2id.json") as f:
+    # load node2id map
+    with open(kg_dir / "node2id.json") as f:
         node2id = json.load(f)
 
     # --- Load records + split ---
@@ -310,6 +331,7 @@ if __name__ == '__main__':
         num_fusion_layers=num_fusion_layers,
         num_heads=num_heads,
         fusion_type=FUSION_TYPE,
+        img_backbone=image_backbone,
         swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
         device=device,
@@ -391,6 +413,8 @@ if __name__ == '__main__':
                 kg_embs,
                 node2id,
                 trainer=kg_trainer,
+                labels=batch['labels'],
+                label_cols=label_cols,
                 loss_type=cfg.kg_method
             )
 
