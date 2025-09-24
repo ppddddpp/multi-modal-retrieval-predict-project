@@ -185,8 +185,15 @@ cython_debug/
 # Ignore large size folders 
 data
 outputs
+outputs_old
 models
+mapped
+eda_data
+z_old_result
+knowledge_graph
+check_run
 splited_data
+splited_data_old
 retrieval_diversity_score
 
 # Local information
@@ -204,6 +211,7 @@ uploadHF.py
 
 # Ignore additional files and folders
 cudaCheck.ipynb
+run.ipynb
 wandb
 upload
 embeddings

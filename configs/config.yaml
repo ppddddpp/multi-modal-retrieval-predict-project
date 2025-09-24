@@ -1,19 +1,33 @@
-epochs:    50
+# Training parameters
+epochs:    2
 patience:  10
 batch_size: 1
 lr:        2e-5
+
+# Model parameters
 num_fusion_layers: 5
 use_focal: false
 use_hybrid: true
 fusion_type: "cross"
 joint_dim: 1024
-gamma_focal: 1
-text_dim: 512
-focal_ratio: 0.3
-temperature: 0.125
-cls_weight: 2.0
-cont_weight: 0.3
 num_heads: 8
+text_dim: 512
 use_shared_ffn: false
 use_cls_only: false
-project_name: "multimodal-disease-classification-1009-experiments"
+
+# Knowledge graph parameters
+kg_method: "cosine"
+kg_emb_dim: 300
+kg_epochs: 5 
+kg_weight: 0.1
+kg_mode: "dataset"   # options: dataset | ontology | hybrid
+
+# Loss parameters
+cls_weight: 2.0
+cont_weight: 0.3
+gamma_focal: 1
+focal_ratio: 0.3
+temperature: 0.125
+
+# Wandb parameters
+project_name: "multimodal-disease-classification-2309-experiments"
