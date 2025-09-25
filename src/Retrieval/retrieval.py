@@ -181,30 +181,51 @@ class Reranker:
         candidate_ids: List[str],
         candidate_embs: Optional[np.ndarray] = None,
         candidate_emb_lookup: Optional[Dict[str, np.ndarray]] = None,
-        topk: Optional[int] = None
+        topk: Optional[int] = None,
+        query_emb: Optional[np.ndarray] = None,   # <-- new optional arg
     ) -> List[Tuple[str, float, float, float, float]]:
         """
         Return list of tuples: (candidate_id, final_score, emb_score, lab_score, kg_score)
+
         - candidate_embs: np.array shape (N, D) in same order as candidate_ids (fast)
-        - OR candidate_emb_lookup: dict id->embedding
-        - If none provided, raises.
+        - OR candidate_emb_lookup: dict id->embedding (may also include the query embedding keyed by query_id)
+        - OR pass query_emb explicitly via `query_emb` argument.
+        - If none provided for candidates, raises.
         """
         N = len(candidate_ids)
-        # 1) get candidate embeddings
+        # 1) get candidate embeddings (build from lookup if needed)
         if candidate_embs is None:
             if candidate_emb_lookup is not None:
-                candidate_embs = np.vstack([candidate_emb_lookup[str(cid)] for cid in candidate_ids])
+                candidate_embs = np.vstack([candidate_emb_lookup.get(str(cid), 
+                                        np.zeros(next(iter(candidate_emb_lookup.values())).shape, dtype=float))
+                                        for cid in candidate_ids])
             else:
                 raise ValueError("Please provide candidate_embs or candidate_emb_lookup.")
 
+        # basic shape check
+        if candidate_embs.shape[0] != N:
+            raise ValueError("candidate_embs rows must match candidate_ids length")
+
         # 2) embedding (cosine) scores
-        # query embedding must be provided via candidate_emb_lookup keyed by query_id or precomputed arrays upstream
-        if candidate_emb_lookup and str(query_id) in candidate_emb_lookup:
+        # Resolve query embedding (multiple fallbacks)
+        q_emb = None
+        if candidate_emb_lookup is not None and str(query_id) in candidate_emb_lookup:
             q_emb = candidate_emb_lookup[str(query_id)]
+        elif query_emb is not None:
+            q_emb = query_emb
         else:
-            # query embedding must be passed in candidate_embs (rare); otherwise reranker can't compute emb similarity
-            # as an alternative user can call rerank with candidate_emb_lookup where query is included
-            raise ValueError("Query embedding not found in candidate_emb_lookup. Provide it keyed by query_id.")
+            # try find query inside candidate_ids and use that row from candidate_embs
+            for i, cid in enumerate(candidate_ids):
+                if str(cid) == str(query_id):
+                    q_emb = candidate_embs[i]
+                    break
+
+        if q_emb is None:
+            raise ValueError(
+                "Query embedding not found. Provide candidate_emb_lookup keyed by query_id, "
+                "or include the query_id in candidate_ids with matching candidate_embs, "
+                "or pass query_emb explicitly."
+            )
 
         emb_scores = [self.safe_cos(q_emb, candidate_embs[i]) for i in range(N)]
 
@@ -485,5 +506,11 @@ if __name__ == "__main__":
     cand_embs = engine.get_embeddings_for_ids(cand_ids)
 
     # rerank using KG+labels
-    ranked = rer.rerank(query_id=query_id, candidate_ids=cand_ids, candidate_embs=cand_embs, topk=20)
+    ranked = rer.rerank(
+        query_id=query_id,
+        candidate_ids=cand_ids,
+        candidate_embs=cand_embs,
+        query_emb=q_emb,
+        topk=20
+    )
     print("Top 5 after rerank:", ranked[:5])
