@@ -12,7 +12,7 @@ class DICOMImagePreprocessor:
     """
     def __init__(self, mean=0.5, std=0.5,
                     default_window_center=40.0, default_window_width=400.0,
-                    output_size=(224, 224), augment=True):
+                    output_size=(224, 224), augment=False):
         self.mean = mean
         self.std = std
         self.default_center = default_window_center
