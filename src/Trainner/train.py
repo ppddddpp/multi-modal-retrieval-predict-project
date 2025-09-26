@@ -18,7 +18,7 @@ from DataHandler import parse_openi_xml, build_dataloader
 from Model import MultiModalRetrievalModel
 from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
-from Helpers import kg_alignment_loss, Config
+from Helpers import kg_alignment_loss, Config, safe_roc_auc
 from KnowledgeGraph import KGBuilder, KGTransETrainer 
 import wandb
 import pandas as pd
@@ -450,8 +450,9 @@ if __name__ == '__main__':
         y_bin = (y_pred > best_ts[None,:]).astype(int)
         
         # macro metrics (averaged over all classes)
+        all_class_aucs = safe_roc_auc(y_true, y_pred)
         val_metrics = {
-            'val_auc':       roc_auc_score(y_true, y_pred, average='macro'),
+            'val_auc':       np.nanmean(all_class_aucs),
             'val_f1':        f1_score(y_true, y_bin, average='macro'),
             'val_precision': precision_score(y_true, y_bin, average='macro', zero_division=0),
             'val_recall':    recall_score(y_true, y_bin, average='macro', zero_division=0),
@@ -460,7 +461,7 @@ if __name__ == '__main__':
         }
 
         # per-class metrics
-        class_aucs = roc_auc_score(y_true, y_pred, average=None)
+        class_aucs = safe_roc_auc(y_true, y_pred)
         class_f1s  = f1_score(y_true, y_bin, average=None)
         class_precs= precision_score(y_true, y_bin, average=None, zero_division=0)
         class_recs = recall_score(y_true, y_bin, average=None, zero_division=0)
@@ -501,8 +502,9 @@ if __name__ == '__main__':
     best_ts = find_best_thresholds(y_true, y_pred)
     y_bin = (y_pred > best_ts[None,:]).astype(int)
 
+    all_class_aucs = safe_roc_auc(y_true, y_pred)
     val_metrics = {
-            'val_auc':       roc_auc_score(y_true, y_pred, average='macro'),
+            'val_auc':       np.nanmean(all_class_aucs),
             'val_f1':        f1_score(y_true, y_bin, average='macro'),
             'val_precision': precision_score(y_true, y_bin, average='macro', zero_division=0),
             'val_recall':    recall_score(y_true, y_bin, average='macro', zero_division=0),
@@ -511,7 +513,7 @@ if __name__ == '__main__':
         }
 
         # per-class metrics
-    class_aucs = roc_auc_score(y_true, y_pred, average=None)
+    class_aucs = safe_roc_auc(y_true, y_pred)
     class_f1s  = f1_score(y_true, y_bin, average=None)
     class_precs= precision_score(y_true, y_bin, average=None, zero_division=0)
     class_recs = recall_score(y_true, y_bin, average=None, zero_division=0)

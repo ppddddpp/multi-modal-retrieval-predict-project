@@ -31,4 +31,4 @@ focal_ratio: 0.3
 temperature: 0.125
 
 # Wandb parameters
-project_name: "multimodal-disease-classification-2309-experiments"
+project_name: "multimodal-disease-classification-2609-experiments"

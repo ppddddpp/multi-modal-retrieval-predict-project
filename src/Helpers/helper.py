@@ -12,6 +12,7 @@ import math
 from typing import Optional, Dict, Any
 from pathlib import Path
 import pickle
+from sklearn.metrics import roc_auc_score
 
 from Helpers import Config
 from DataHandler import  parse_openi_xml
@@ -628,5 +629,19 @@ def _sanitize_node(s: str) -> str:
     s2 = re.sub(r'[^A-Za-z0-9_:.-]', '', s2)
     return s2
 
+def safe_roc_auc(y_true, y_pred, label_names=None):
+    results = []
+    skipped = []
+    for i in range(y_true.shape[1]):
+        if len(np.unique(y_true[:, i])) < 2:
+            results.append(float("nan"))
+            if label_names is not None:
+                skipped.append(label_names[i])
+        else:
+            results.append(roc_auc_score(y_true[:, i], y_pred[:, i]))
+    if skipped:
+        print(f"Skipped AUROC for classes with no positives/negatives: {skipped}")
+    return np.array(results)
+
 __all__ = ("find_dicom_file", "load_report_lookup_via_parser",
-            "report_lookup", "make_attention_maps", "attention_to_html", "kg_alignment_loss", "log_and_print", "_sanitize_node")
+            "report_lookup", "make_attention_maps", "attention_to_html", "kg_alignment_loss", "log_and_print", "_sanitize_node", "safe_roc_auc")

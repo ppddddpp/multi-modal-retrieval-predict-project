@@ -3,7 +3,7 @@ from .contruct_test_db import construct_db_test
 from .contructGT import create_gt
 from .dumpEmbedding import createDumpEmbedding
 from .helper import load_report_lookup_via_parser, find_dicom_file, safe_unpack_topk, resize_to_match, compare_maps, to_numpy, heatmap_to_base64_overlay
-from .helper import save_b64_map, attention_to_html, make_attention_maps, kg_alignment_loss, log_and_print, _sanitize_node
+from .helper import save_b64_map, attention_to_html, make_attention_maps, kg_alignment_loss, log_and_print, _sanitize_node, safe_roc_auc
 from .model_utils import load_hf_model_or_local
 from .swinDownload import download_swin
 from .webTestSetContruct import create_test_set_for_web
@@ -28,5 +28,6 @@ __all__ = [
     "download_swin",
     "create_test_set_for_web",
     "log_and_print",
-    "_sanitize_node"
+    "_sanitize_node",
+    "safe_roc_auc"
 ]
