@@ -76,6 +76,8 @@ class MultiModalRetrievalModel(nn.Module):
         swin_name:    str = "swin_base_patch4_window7_224",
         cnn_name: str = "resnet50",
         bert_name:    str = "emilyalsentzer/Bio_ClinicalBERT",
+        img_dim:      int = None,
+        txt_dim:      int = None,
         swin_ckpt_path:    str = None,
         bert_local_dir:   str = None,
         pretrained:   bool = True,
@@ -98,6 +100,8 @@ class MultiModalRetrievalModel(nn.Module):
         :param swin_name: name of the Swin transformer model to use
         :param cnn_name: name of the CNN model to use
         :param bert_name: name of the ClinicalBERT model to use
+        :param img_dim: dimensionality of the image embedding
+        :param txt_dim: dimensionality of the text embedding
         :param swin_ckpt_path: path to a Swin transformer checkpoint to load
         :param bert_local_dir: directory containing a ClinicalBERT model to load
         :param pretrained: whether to load pre-trained weights for the Swin and ClinicalBERT models
@@ -119,6 +123,8 @@ class MultiModalRetrievalModel(nn.Module):
             swin_name (str, optional): name of the Swin transformer model to use. Defaults to "swin_base_patch4_window7_224".
             cnn_name (str, optional): name of the CNN model to use. Defaults to "resnet50".
             bert_name (str, optional): name of the ClinicalBERT model to use. Defaults to "emilyalsentzer/Bio_ClinicalBERT".
+            img_dim (int, optional): dimensionality of the image embedding. Defaults to None.
+            txt_dim (int, optional): dimensionality of the text embedding. Defaults to None.
             swin_ckpt_path (str, optional): path to a Swin transformer checkpoint to load. Defaults to None.
             bert_local_dir (str, optional): directory containing a ClinicalBERT model to load. Defaults to None.
             pretrained (bool, optional): whether to load pre-trained weights for the Swin and ClinicalBERT models. Defaults to True.
@@ -140,7 +146,9 @@ class MultiModalRetrievalModel(nn.Module):
             bert_model_name    = bert_name,
             swin_checkpoint_path = swin_ckpt_path,
             bert_local_dir       = bert_local_dir,
-            pretrained           = pretrained
+            pretrained           = pretrained,
+            img_dim              =img_dim,
+            txt_dim              =txt_dim
         ).to(device)
         img_dim = self.backbones.img_dim
         txt_dim = self.backbones.txt_dim

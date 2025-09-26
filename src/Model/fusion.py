@@ -46,7 +46,8 @@ class Backbones(nn.Module):
             swin_checkpoint_path=None,
             bert_local_dir=None,
             pretrained=True,
-            joint_dim=1024
+            img_dim=None,
+            txt_dim=None
             ):
         """
         Constructor for Backbones.
@@ -66,8 +67,10 @@ class Backbones(nn.Module):
                 If None, downloads from HuggingFace.
             pretrained (bool): Whether to load the pre-trained weights.
                 Defaults to True.
-            joint_dim (int): The dimension of the joint embedding. 
-            Defaults to 1024.
+            img_dim (int): The dimension of the image embedding.
+                Defaults to None.
+            txt_dim (int): The dimension of the text embedding.
+                Defaults to None.
         """
         super().__init__()
         self.img_backbone = img_backbone
@@ -93,7 +96,7 @@ class Backbones(nn.Module):
                     self.vision.load_state_dict(filtered, strict=False)
             elif pretrained:
                 self.vision = timm.create_model(swin_model_name, pretrained=True, in_chans=1)
-            self.img_dim = self.vision.num_features
+            self.img_dim = self.vision.num_features if img_dim is None else img_dim
 
         elif img_backbone == "cnn":
             from torchvision import models
@@ -120,7 +123,7 @@ class Backbones(nn.Module):
         
         # ---- Text backbone ----
         self.bert = load_hf_model_or_local(bert_model_name, local_dir=bert_local_dir)
-        self.txt_dim = self.bert.config.hidden_size
+        self.txt_dim = self.bert.config.hidden_size if txt_dim is None else txt_dim
 
     def swin_features(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -219,8 +222,17 @@ class Backbones(nn.Module):
 
         txt_feats = None
         if input_ids is not None:
-            txt_feats = self.bert(input_ids=input_ids,
-                                attention_mask=attention_mask).last_hidden_state
+            max_len = getattr(self.bert.config, "max_position_embeddings", 512)
+            if input_ids.size(1) > max_len:
+                print(f"[WARN] Truncating seq_len {input_ids.size(1)} -> {max_len}")
+                input_ids = input_ids[:, :max_len]
+                if attention_mask is not None:
+                    attention_mask = attention_mask[:, :max_len]
+
+            txt_feats = self.bert(
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            ).last_hidden_state
 
         return (img_global, img_patches), txt_feats
 

@@ -19,6 +19,10 @@ def tokenize_report(text, tokenizer, max_length=128):
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: A tuple containing the tokenized input IDs and attention mask.
     """
+    if max_length > 512:
+        max_length = 512
+        print(f"Tokenizing report with max_length={max_length}")
+    
     tokens = tokenizer(
         text or "",
         padding='max_length',

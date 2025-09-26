@@ -19,6 +19,7 @@ class Config:
     joint_dim: int = 1024
     num_heads: int = 32
     text_dim: int = 512
+    max_seq_len: int = 512
     use_shared_ffn: bool = True
     use_cls_only: bool = False
 
