@@ -41,7 +41,7 @@ class Config:
     project_name: str = "multi-modal-retrieval-predict"
 
     # Auto-generated
-    run_name: str = field(init=False)
+    run_name: str = field(init=False, default="")
 
     def __post_init__(self):
         if self.use_hybrid:
@@ -54,8 +54,8 @@ class Config:
         self.set_run_name(name_method)
 
     def set_run_name(self, name_method: str):
-        cfg_dict = asdict(self)
-        cfg_dict.pop("run_name", None)
+        # skip run_name when building dict
+        cfg_dict = {f.name: getattr(self, f.name) for f in fields(self) if f.name != "run_name"}
 
         parts = [f"method={name_method}"]
         for k, v in cfg_dict.items():

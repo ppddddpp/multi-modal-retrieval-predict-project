@@ -12,7 +12,7 @@ image_backbone: "swin"
 fusion_type: "cross"
 joint_dim: 1024
 num_heads: 8
-text_dim: 512
+text_dim: 768
 use_shared_ffn: false
 use_cls_only: false
 

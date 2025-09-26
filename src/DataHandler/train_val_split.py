@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from iterstrat.ml_stratifiers import MultilabelStratifiedShuffleSplit
 
-from dataParser import parse_openi_xml
+from .dataParser import parse_openi_xml
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 
 # Resolve paths...
