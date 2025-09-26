@@ -271,9 +271,12 @@ class MultiModalRetrievalModel(nn.Module):
         attention_mask (torch.Tensor): (B, L)
 
         Returns:
-        joint_emb (torch.Tensor): (B, joint_dim)
-        logits (torch.Tensor): (B, num_classes)
-        dict: attn_weights (only if return_attention=True)
+        dict with keys:
+            - "joint_emb": (B, joint_dim)
+            - "img_emb":   (B, joint_dim) or None
+            - "txt_emb":   (B, joint_dim) or None
+            - "logits":    (B, num_classes)
+            - "attn":      dict of attention maps (if return_attention=True), else None
         """
         attn_weights = {}
         joint_emb = None
@@ -284,6 +287,16 @@ class MultiModalRetrievalModel(nn.Module):
             input_ids.to(self.device) if input_ids is not None else None,
             attention_mask.to(self.device) if attention_mask is not None else None
         )
+
+        img_emb = self.img_proj(img_global) if img_global is not None else None
+        if txt_feats is not None:
+            if self.use_cls_only:
+                txt_emb = txt_feats[:, 0, :]
+            else:
+                txt_emb = txt_feats.mean(dim=1)
+            txt_emb = self.txt_proj(txt_emb)
+        else:
+            txt_emb = None
         
         if self.model_type == "multimodal":
             for i, fusion in enumerate(self.fusion_layers):
@@ -390,7 +403,13 @@ class MultiModalRetrievalModel(nn.Module):
         
         logits = self.classifier(joint_emb)
 
-        return joint_emb, logits, (attn_weights if return_attention else None)
+        return {
+            "joint_emb": joint_emb,
+            "img_emb": img_emb,
+            "txt_emb": txt_emb,
+            "logits": logits,
+            "attn": (attn_weights if return_attention else None)
+        }
 
     def predict(self,
                 image: torch.Tensor,

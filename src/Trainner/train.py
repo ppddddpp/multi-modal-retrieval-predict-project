@@ -12,13 +12,13 @@ import numpy as np
 import pandas as pd
 import torch.nn as nn
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve, precision_score, recall_score, accuracy_score
+from sklearn.metrics import average_precision_score, f1_score, precision_recall_curve, precision_score, recall_score, accuracy_score
 from transformers import get_cosine_schedule_with_warmup
 from DataHandler import parse_openi_xml, build_dataloader
 from Model import MultiModalRetrievalModel
 from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
-from Helpers import kg_alignment_loss, Config, safe_roc_auc
+from Helpers import kg_alignment_loss, contrastive_loss, Config, safe_roc_auc, safe_avg_precision
 from KnowledgeGraph import KGBuilder, KGTransETrainer 
 import wandb
 import pandas as pd
@@ -62,6 +62,8 @@ FOCAL_RATIO = cfg.focal_ratio  # Ratio of focal loss in hybrid loss (if USE_HYBR
 temperature = cfg.temperature                # temperature for contrastive loss
 cls_weight   = cfg.cls_weight                  # focuses on getting the labels right (1.0 is very focus on classification, 0.0 is very focus on contrastive learning)
 cont_weight  = cfg.cont_weight                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
+weight_img_joint = cfg.weight_img_joint
+weight_text_joint = cfg.weight_text_joint
 kg_weight = cfg.kg_weight
 kg_emb_dim = cfg.kg_emb_dim
 kg_epochs = cfg.kg_epochs
@@ -118,7 +120,13 @@ def evaluate(model, loader):
             labels = batch['labels'].cpu().numpy()
             id_list = batch['id']
 
-            joint_emb, logits, attn_weights = model(imgs, ids, mask, return_attention=True)
+            outputs      = model(imgs, ids, mask, return_attention=True)
+            joint_emb    = outputs["joint_emb"]
+            img_emb      = outputs["img_emb"]
+            txt_emb      = outputs["txt_emb"]
+            logits       = outputs["logits"]
+            attn_weights = outputs["attn"]
+
             probs = torch.sigmoid(logits).cpu().numpy()
 
             all_labels.append(labels)
@@ -126,8 +134,9 @@ def evaluate(model, loader):
             all_ids.extend(id_list)
             all_embs.append(joint_emb.cpu())
             
-            attn_cpu = {k: v.detach().cpu() for k, v in attn_weights.items()}
-            all_attns.append(attn_cpu)
+            if attn_weights is not None:
+                attn_cpu = {k: v.detach().cpu() for k, v in attn_weights.items()}
+                all_attns.append(attn_cpu)
 
     y_true = np.vstack(all_labels)
     y_pred = np.vstack(all_logits)
@@ -275,7 +284,11 @@ if __name__ == '__main__':
     sample_weights = []
     for r in train_records:
         label_vec = np.array(r['labels'], dtype=float)
-        sample_weights.append((label_vec * inv_freq).sum())
+        if label_vec.sum() > 0:
+            weight = (inv_freq * label_vec).max()
+        else:
+            weight = 1.0  # for all-negative samples
+        sample_weights.append(weight)
 
     sampler = WeightedRandomSampler(
         sample_weights,
@@ -379,8 +392,7 @@ if __name__ == '__main__':
             for i, cn in enumerate(label_cols)}, step=0)
 
     # --- Early stopping ---
-    best_f1 = 0
-    best_auc = 0
+    best_score = -float("inf")
     patience_counter = 0
     
     print("Starting training...")
@@ -397,16 +409,23 @@ if __name__ == '__main__':
             optimizer.zero_grad()
 
             # joint_emb: (B, joint_dim), logits: (B, num_classes)
-            joint_emb, logits, attn_weights = model(imgs, ids, mask, return_attention=False)
+            outputs      = model(imgs, ids, mask, return_attention=True)
+            joint_emb    = outputs["joint_emb"]
+            img_emb      = outputs["img_emb"]
+            txt_emb      = outputs["txt_emb"]
+            logits       = outputs["logits"]
+            attn_weights = outputs["attn"]
 
             # Classification loss
             cls_loss = criterion(logits, labels)
 
-            # Contrastive loss (InfoNCE on the joint embedding)
-            z_norm = torch.nn.functional.normalize(joint_emb, dim=1)       # (B, D)
-            sim_matrix = torch.matmul(z_norm, z_norm.T) / temperature      # cosine‑similarity (B, B) 
-            cont_targets = torch.arange(sim_matrix.size(0), device=sim_matrix.device)
-            cont_loss = torch.nn.functional.cross_entropy(sim_matrix, cont_targets)
+            # Contrastive loss
+            loss_img_txt   = contrastive_loss(img_emb, txt_emb, temperature)
+            loss_img_joint = contrastive_loss(img_emb, joint_emb, temperature)
+            loss_txt_joint = contrastive_loss(txt_emb, joint_emb, temperature)
+
+            cont_loss = loss_img_txt + weight_img_joint * loss_img_joint + weight_text_joint * loss_txt_joint
+            
             kg_loss = kg_alignment_loss(
                 joint_emb,
                 batch['id'],
@@ -442,35 +461,63 @@ if __name__ == '__main__':
             "train_loss": avg_train_loss,
             "epoch": epoch + 1
         })
+
         y_true, y_pred, val_embs, val_ids, val_attns = evaluate(model, val_loader)
         best_ts = find_best_thresholds(y_true, y_pred)
+        y_bin = (y_pred > best_ts[None, :]).astype(int)
+
         for i, cn in enumerate(label_cols):
             wandb.log({f"thresh_{cn}": float(best_ts[i]), "epoch": epoch+1})
-
-        y_bin = (y_pred > best_ts[None,:]).astype(int)
         
         # macro metrics (averaged over all classes)
-        all_class_aucs = safe_roc_auc(y_true, y_pred)
+        # per-class AUROC (nan if invalid)
+        class_aucs = safe_roc_auc(y_true, y_pred, label_names=label_cols)   # shape (C,)
+
+        # per-class Average Precision (PR-AUC), returns NaN for invalid classes
+        class_aps = safe_avg_precision(y_true, y_pred, label_names=label_cols)  # shape (C,)
+
+        # thresholds already computed earlier as `best_ts` (if not, use 0.5 during training)
+        y_bin = (y_pred > best_ts[None, :]).astype(int)
+
+        # per-class F1 / precision / recall (these functions handle zero_division)
+        class_f1s   = f1_score(y_true, y_bin, average=None, zero_division=0)
+        class_precs = precision_score(y_true, y_bin, average=None, zero_division=0)
+        class_recs  = recall_score(y_true, y_bin, average=None, zero_division=0)
+
+        # aggregated metrics
+        # macro AUC = mean over valid classes (ignore NaNs)
+        macro_auc = float(np.nanmean(class_aucs))
+        macro_ap  = float(np.nanmean(class_aps))
+
+        # micro PR-AUC (global): wrap in try/except because it can error when no positives at all
+        try:
+            micro_ap = float(average_precision_score(y_true, y_pred, average='micro'))
+        except Exception:
+            micro_ap = float("nan")
+
+        # micro F1 / precision / recall (global counts)
+        micro_f1   = float(f1_score(y_true, y_bin, average='micro', zero_division=0))
+        micro_prec = float(precision_score(y_true, y_bin, average='micro', zero_division=0))
+        micro_rec  = float(recall_score(y_true, y_bin, average='micro', zero_division=0))
+
+        # macro F1/prec/rec (still useful)
+        macro_f1   = float(f1_score(y_true, y_bin, average='macro'))
+        macro_prec = float(precision_score(y_true, y_bin, average='macro', zero_division=0))
+        macro_rec  = float(recall_score(y_true, y_bin, average='macro', zero_division=0))
+
         val_metrics = {
-            'val_auc':       np.nanmean(all_class_aucs),
-            'val_f1':        f1_score(y_true, y_bin, average='macro'),
-            'val_precision': precision_score(y_true, y_bin, average='macro', zero_division=0),
-            'val_recall':    recall_score(y_true, y_bin, average='macro', zero_division=0),
-            'val_accuracy':  accuracy_score(y_true, y_bin),
-            'epoch':         epoch+1
+            "val_auc_macro": macro_auc,
+            "val_ap_macro": macro_ap,
+            "val_ap_micro": micro_ap,
+            "val_f1_macro": macro_f1,
+            "val_f1_micro": micro_f1,
+            "val_prec_macro": macro_prec,
+            "val_prec_micro": micro_prec,
+            "val_rec_macro": macro_rec,
+            "val_rec_micro": micro_rec,
+            "val_accuracy": float(accuracy_score(y_true, y_bin)),
+            "epoch": epoch + 1
         }
-
-        # per-class metrics
-        class_aucs = safe_roc_auc(y_true, y_pred)
-        class_f1s  = f1_score(y_true, y_bin, average=None)
-        class_precs= precision_score(y_true, y_bin, average=None, zero_division=0)
-        class_recs = recall_score(y_true, y_bin, average=None, zero_division=0)
-        for i, cn in enumerate(label_cols):
-            val_metrics[f'val_auc_{cn}'] = class_aucs[i]
-            val_metrics[f'val_f1_{cn}'] = class_f1s[i]
-            val_metrics[f'val_prec_{cn}'] = class_precs[i]
-            val_metrics[f'val_rec_{cn}'] = class_recs[i]
-
         wandb.log(val_metrics)
 
         # save CSV for EDA
@@ -483,8 +530,11 @@ if __name__ == '__main__':
         # --- Checkpointing & early stop ---
         torch.save(model.state_dict(), CHECKPOINT_DIR / f"model_epoch_{epoch+1}.pt")
 
-        if val_metrics['val_f1'] > best_f1:
-            best_f1 = val_metrics['val_f1']
+        # --- Early stopping ---
+        composite = 0.5 * macro_f1 + 0.5 * macro_auc
+        wandb.log({"val_composite": composite, "epoch": epoch + 1})
+        if composite > best_score:
+            best_score = composite
             patience_counter = 0
             torch.save(model.state_dict(), CHECKPOINT_DIR / "model_best.pt")
             np.save(EMBED_SAVE_PATH / "val_joint_embeddings.npy", val_embs)

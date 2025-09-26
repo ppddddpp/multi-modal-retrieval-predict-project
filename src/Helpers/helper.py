@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 import pickle
 from sklearn.metrics import roc_auc_score
+from sklearn.metrics import average_precision_score
 
 from Helpers import Config
 from DataHandler import  parse_openi_xml
@@ -643,5 +644,43 @@ def safe_roc_auc(y_true, y_pred, label_names=None):
         print(f"Skipped AUROC for classes with no positives/negatives: {skipped}")
     return np.array(results)
 
+def safe_avg_precision(y_true, y_pred, label_names=None):
+    """
+    Compute per-class average precision (PR-AUC). If a class has only one label
+    present in y_true (all 0s or all 1s), return NaN for that class and optionally
+    collect its name in skipped.
+    Returns: np.array(per_class_ap), skipped_list
+    """
+    results = []
+    skipped = []
+    for i in range(y_true.shape[1]):
+        true_col = y_true[:, i]
+        # if only one class present -> skip
+        if len(np.unique(true_col)) < 2:
+            results.append(float("nan"))
+            if label_names is not None:
+                skipped.append(label_names[i])
+            continue
+        try:
+            ap = average_precision_score(true_col, y_pred[:, i])
+            results.append(float(ap))
+        except Exception:
+            # fallback to nan if something goes wrong
+            results.append(float("nan"))
+            if label_names is not None:
+                skipped.append(label_names[i])
+    if skipped:
+        print(f"Skipped AP for classes with no positives/negatives: {skipped}")
+    return np.array(results)
+
+def contrastive_loss(x, y, temperature=0.1):
+    x = torch.nn.functional.normalize(x, dim=1)
+    y = torch.nn.functional.normalize(y, dim=1)
+    logits = torch.matmul(x, y.T) / temperature  # (B, B)
+    labels = torch.arange(logits.size(0), device=logits.device)
+    return torch.nn.functional.cross_entropy(logits, labels)
+
 __all__ = ("find_dicom_file", "load_report_lookup_via_parser",
-            "report_lookup", "make_attention_maps", "attention_to_html", "kg_alignment_loss", "log_and_print", "_sanitize_node", "safe_roc_auc")
+            "report_lookup", "make_attention_maps", "attention_to_html",
+            "kg_alignment_loss", "log_and_print", "_sanitize_node",
+            "safe_roc_auc", "safe_avg_precision", "contrastive_loss")

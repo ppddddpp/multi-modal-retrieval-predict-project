@@ -1,7 +1,7 @@
 # Training parameters
 epochs:    50
 patience:  10
-batch_size: 1
+batch_size: 32
 lr:        2e-5
 
 # Model parameters
@@ -26,6 +26,8 @@ kg_mode: "hybrid"   # options: dataset | ontology | hybrid
 # Loss parameters
 cls_weight: 2.0
 cont_weight: 0.3
+weight_img_joint : 0.5
+weight_text_joint : 0.5
 gamma_focal: 1
 focal_ratio: 0.3
 temperature: 0.125
