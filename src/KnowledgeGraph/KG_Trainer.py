@@ -147,7 +147,7 @@ class KGTransETrainer:
             try:
                 if getattr(wandb, "run", None) is None:
                     run_name = wandb_config.get("name") if wandb_config and "name" in wandb_config \
-                            else f"kg_train_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                            else f"kg_train_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     init_kwargs = {
                         "project": wandb_config.get("project", "multi-modal-kg") if wandb_config else "multi-modal-kg",
                         "name": run_name,

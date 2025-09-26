@@ -331,7 +331,7 @@ if __name__ == '__main__':
     elif USE_HYBRID:
         # --- Hybrid BCE + Focal ---
         bce   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        alpha = torch.tensor(inv_freq, dtype=torch.float32).to(device)
+        alpha = torch.as_tensor(inv_freq, dtype=torch.float32, device=device)
         focal = FocalLoss(gamma=gamma_FOCAL, alpha=alpha)
         criterion = lambda logits, labels: (1 - FOCAL_RATIO) * bce(logits, labels) + FOCAL_RATIO * focal(logits, labels)
     else:

@@ -24,7 +24,7 @@ kg_weight: 0.1
 kg_mode: "hybrid"   # options: dataset | ontology | hybrid
 
 # Loss parameters
-cls_weight: 2.0
+cls_weight: 3.0
 cont_weight: 0.3
 weight_img_joint : 0.5
 weight_text_joint : 0.5
