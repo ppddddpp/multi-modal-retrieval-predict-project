@@ -17,11 +17,17 @@ use_shared_ffn: false
 use_cls_only: false
 
 # Knowledge graph parameters
+kg_model: "TransE"       # options: TransE | TransH | RotatE | CompGCN
 kg_method: "cosine"
 kg_emb_dim: 300
 kg_epochs: 30 
 kg_weight: 0.1
 kg_mode: "hybrid"   # options: dataset | ontology | hybrid
+
+# CompGCN-specific (only used if kg_model=CompGCN)
+kg_num_layers: 2
+kg_dropout: 0.3
+kg_opn: "corr"           # options: sub | mult | corr
 
 # Loss parameters
 cls_weight: 3.0

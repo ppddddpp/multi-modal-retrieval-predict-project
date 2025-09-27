@@ -200,7 +200,7 @@ retrieval_diversity_score
 step.txt
 structure.txt
 
-# Ignore EDA python notebooks which already have codes in .py 
+# Ignore EDA python notebooks which already have codes in .py and additional files
 EDA_after_split.ipynb
 EDA_before_split.ipynb
 data_phrase_check.ipynb
@@ -208,6 +208,7 @@ dataEDAnLabeledCheck.ipynb
 finalOutputDataEDA.ipynb
 show_iou_scores.ipynb
 uploadHF.py
+check.py
 
 # Ignore additional files and folders
 cudaCheck.ipynb

@@ -19,7 +19,7 @@ from Model import MultiModalRetrievalModel
 from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 from Helpers import kg_alignment_loss, contrastive_loss, Config, safe_roc_auc, safe_avg_precision
-from KnowledgeGraph import KGBuilder, KGTransETrainer 
+from KnowledgeGraph import KGBuilder, KGTrainer 
 import wandb
 import pandas as pd
 from dotenv import load_dotenv
@@ -64,6 +64,7 @@ cls_weight   = cfg.cls_weight                  # focuses on getting the labels r
 cont_weight  = cfg.cont_weight                  # focuses on pulling matching (image, text) embeddings closer in the joint space (1.0 is very focus on contrastive learning, 0.0 is very focus on classification)
 weight_img_joint = cfg.weight_img_joint
 weight_text_joint = cfg.weight_text_joint
+
 kg_weight = cfg.kg_weight
 kg_emb_dim = cfg.kg_emb_dim
 kg_epochs = cfg.kg_epochs
@@ -71,6 +72,7 @@ if cfg.kg_method in ["cosine", "mse"]:
     kg_method = cfg.kg_method
 else:
     raise RuntimeError(f"KG method {cfg.kg_method} not supported")
+
 num_heads = cfg.num_heads                     # number of attention heads in the fusion model
 num_fusion_layers= cfg.num_fusion_layers
 use_shared_ffn = cfg.use_shared_ffn
@@ -197,10 +199,12 @@ if __name__ == '__main__':
     combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
     
     # --- Train KG ---
-    kg_trainer = KGTransETrainer(
+    kg_trainer = KGTrainer(
         kg_dir=BASE_DIR/"knowledge_graph",
         emb_dim=cfg.kg_emb_dim,
-        joint_dim=cfg.joint_dim
+        joint_dim=cfg.joint_dim,
+        model_name=cfg.kg_model,
+        model_kwargs=cfg.kg_model_kwargs,
     )
 
     if not (BASE_DIR/"knowledge_graph"/"node_embeddings.npy").exists():
