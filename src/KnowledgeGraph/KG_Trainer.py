@@ -4,13 +4,13 @@ import csv
 import os
 import numpy as np
 import random
-from typing import List, Optional, Tuple, Dict
+from typing import Optional, Tuple
 import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
-from compgcn_conv import CompGCNConv
+from .compgcn_conv import CompGCNConv
 import wandb
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
