@@ -1,7 +1,7 @@
 # Training parameters
 epochs:    50
 patience:  10
-batch_size: 32
+batch_size: 8
 lr:        2e-5
 
 # Model parameters
@@ -21,7 +21,6 @@ kg_model: "TransE"       # options: TransE | TransH | RotatE | CompGCN
 kg_method: "cosine"
 kg_emb_dim: 300
 kg_epochs: 30 
-kg_weight: 0.1
 kg_mode: "hybrid"   # options: dataset | ontology | hybrid
 
 # CompGCN-specific (only used if kg_model=CompGCN)
@@ -30,8 +29,9 @@ kg_dropout: 0.3
 kg_opn: "corr"           # options: sub | mult | corr
 
 # Loss parameters
-cls_weight: 3.0
-cont_weight: 0.3
+cls_weight: 3.5
+cont_weight: 0.12
+kg_weight: 0.15
 weight_img_joint : 0.5
 weight_text_joint : 0.5
 gamma_focal: 1
