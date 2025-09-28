@@ -36,7 +36,7 @@ def load_hf_model_or_local(
         print(f"[Local] Trying to load {'tokenizer' if is_tokenizer else 'model'} from {local_dir}")
         return loader(str(local_dir), **kwargs)
     except (OSError, ValueError):
-        print(f"[Download] {model_name} → will save to {local_dir}")
+        print(f"[Download] {model_name} will save to {local_dir}")
 
     # Download from HF hub
     local_dir.mkdir(parents=True, exist_ok=True)

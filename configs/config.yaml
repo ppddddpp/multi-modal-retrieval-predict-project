@@ -17,7 +17,7 @@ use_shared_ffn: false
 use_cls_only: false
 
 # Knowledge graph parameters
-kg_model: "TransE"       # options: TransE | TransH | RotatE | CompGCN
+kg_model: "CompGCN"       # options: TransE | TransH | RotatE | CompGCN
 kg_method: "cosine"
 kg_emb_dim: 300
 kg_epochs: 30 
