@@ -6,6 +6,7 @@ import base64
 import matplotlib.pyplot as plt
 from PIL import Image
 import torch
+import torch.nn.functional as F
 import os
 from PIL import Image
 import math
@@ -673,12 +674,16 @@ def safe_avg_precision(y_true, y_pred, label_names=None):
         print(f"Skipped AP for classes with no positives/negatives: {skipped}")
     return np.array(results)
 
-def contrastive_loss(x, y, temperature=0.1):
-    x = torch.nn.functional.normalize(x, dim=1)
-    y = torch.nn.functional.normalize(y, dim=1)
-    logits = torch.matmul(x, y.T) / temperature  # (B, B)
-    labels = torch.arange(logits.size(0), device=logits.device)
-    return torch.nn.functional.cross_entropy(logits, labels)
+def contrastive_loss(x, y, temperature=0.1, symmetric=True):
+    x = F.normalize(x, dim=1)
+    y = F.normalize(y, dim=1)
+    logits_xy = torch.matmul(x, y.T) / (temperature + 1e-12)
+    labels = torch.arange(logits_xy.size(0), device=logits_xy.device)
+    loss_xy = F.cross_entropy(logits_xy, labels)
+    if not symmetric:
+        return loss_xy
+    loss_yx = F.cross_entropy(torch.matmul(y, x.T) / (temperature + 1e-12), labels)
+    return 0.5 * (loss_xy + loss_yx)
 
 __all__ = ("find_dicom_file", "load_report_lookup_via_parser",
             "report_lookup", "make_attention_maps", "attention_to_html",
