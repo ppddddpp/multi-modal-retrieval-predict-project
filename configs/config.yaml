@@ -19,13 +19,13 @@ use_cls_only: false
 # Knowledge graph parameters
 kg_model: "CompGCN"       # options: TransE | TransH | RotatE | CompGCN
 kg_method: "cosine"
-kg_emb_dim: 300
-kg_epochs: 30 
+kg_emb_dim: 400
+kg_epochs: 50
 kg_mode: "hybrid"   # options: dataset | ontology | hybrid
 
 # CompGCN-specific (only used if kg_model=CompGCN)
-kg_num_layers: 2
-kg_dropout: 0.3
+kg_num_layers: 3
+kg_dropout: 0.25
 kg_opn: "corr"           # options: sub | mult | corr
 
 # Loss parameters
