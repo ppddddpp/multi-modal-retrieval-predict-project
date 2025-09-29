@@ -400,15 +400,17 @@ class KGTrainer:
                 # project if needed (projection lives on self.device)
                 if self.image_feat_proj is not None:
                     v_proj = self.image_feat_proj(v)  # already on self.device
+                    v_write = v_proj.detach()
                 else:
-                    v_proj = v
+                    v_write = v
 
                 # write into embedding table
-                if replace:
-                    self.model.ent.weight[idx].copy_(v_proj)
-                else:
-                    # additive: scale down a bit so it won't blow up norms
-                    self.model.ent.weight[idx].add_(v_proj * 0.5)
+                with torch.no_grad():
+                    if replace:
+                        self.model.ent.weight[idx].copy_(v_write)
+                    else:
+                        # Scale by 0.5 to avoid clipping
+                        self.model.ent.weight[idx].add_(v_write * 0.5)
 
                 injected += 1
 
@@ -490,9 +492,15 @@ class KGTrainer:
         adv_temp = advance_temp if advance_temp > 0.0 else 1.0
 
         for epoch in tqdm(range(1, epochs + 1), desc="KG Train", unit="epoch"):
+            self.model.train()
             idxs = np.arange(n)
             np.random.shuffle(idxs)
             epoch_loss = 0.0
+
+            self._cached_x_all = None
+            self._cached_r_all = None
+            x_all = None
+            r_all = None
 
             # --- Optional: precompute CompGCN propagated embeddings once per epoch ---
             if self.model_name == "CompGCN":
@@ -614,6 +622,23 @@ class KGTrainer:
 
                 # ---------- Backward with GradScaler ----------
                 self.optimizer.zero_grad()
+
+                if not getattr(loss, "requires_grad", False):
+                    # helpful debug prints
+                    print(f"[ERROR] loss.requires_grad=False; detaching info:")
+                    try:
+                        print("  pos_scores.requires_grad =", getattr(pos_scores, "requires_grad", None))
+                        print("  neg_scores_all.requires_grad =", getattr(neg_scores_all, "requires_grad", None))
+                    except Exception:
+                        pass
+                    # clear cache to avoid future silent reuse
+                    self._cached_x_all = None
+                    self._cached_r_all = None
+                    raise RuntimeError(
+                        "Loss has requires_grad=False. Likely cause: using cached embeddings "
+                        "computed with torch.no_grad() during training. See KGTrainer fixes."
+                    )
+
                 if use_amp:
                     scaler.scale(loss).backward()
                     scaler.step(self.optimizer)
@@ -701,6 +726,12 @@ class KGTrainer:
                             break
                 except Exception as e:
                     print(f"[WARN] evaluation failed: {e}")
+                    try:
+                        self.model.train()
+                    except Exception:
+                        pass
+                    self._cached_x_all = None
+                    self._cached_r_all = None
 
             if log_to_wandb:
                 try:
