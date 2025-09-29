@@ -759,10 +759,12 @@ class KGTrainer:
                             start: int = 1024,
                             max_batch: int = 1 << 20,
                             safety_factor: float = 0.9,
-                            max_trials: int = 20) -> int:
+                            max_trials: int = 20,
+                            target_util: float = 0.7) -> int:
         """
         Find the largest candidate-chunk size that can be scored without OOM,
-        for a batch of (s, r) queries at once.
+        for a batch of (s, r) queries at once, and then scale it up so that
+        GPU memory utilization is at least `target_util`.
 
         Args:
             s_batch, r_batch: tensors of shape (B,) describing multiple queries.
@@ -772,6 +774,7 @@ class KGTrainer:
             max_batch: absolute upper limit.
             safety_factor: fraction to apply to the found maximum.
             max_trials: number of probing attempts.
+            target_util: target GPU memory utilization (e.g. 0.7 => 70%).
 
         Returns:
             suggested candidate batch size (int).
@@ -874,7 +877,24 @@ class KGTrainer:
 
         max_ok = max(1, lo)
         suggested = max(1, int(max_ok * safety_factor))
-        return min(suggested, candidates.size(0))
+        suggested = min(suggested, candidates.size(0))
+
+        # --- new part: bump to reach ≥ target_util ---
+        free, total = torch.cuda.mem_get_info(device)
+        used = total - free
+        used_percent = used / total if total > 0 else 0.0
+
+        if used_percent < target_util:
+            factor = target_util / max(used_percent, 1e-6)
+            bumped = int(suggested * factor)
+            bumped = min(bumped, candidates.size(0), max_batch)
+            if bumped > suggested:
+                print(f"[KGTrainer] Bumping cand_batch_size {suggested} -> {bumped} "
+                      f"to reach more than {target_util*100:.0f}% GPU util "
+                      f"(current {used_percent*100:.1f}%)")
+                suggested = bumped
+
+        return suggested
 
     def batched_scores(self,
                     s_t: torch.Tensor,
