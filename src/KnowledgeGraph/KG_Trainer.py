@@ -456,7 +456,7 @@ class KGTrainer:
             use_amp = torch.cuda.is_available()
         use_amp = bool(use_amp) and torch.cuda.is_available()
 
-        scaler = amp.GradScaler("cuda", enabled=use_amp)
+        scaler = amp.GradScaler(enabled=use_amp)
 
         n = len(self.pos_s)
         steps = max(1, (n + batch_size - 1) // batch_size)
@@ -662,14 +662,14 @@ class KGTrainer:
             # normalize embeddings
             if normalize:
                 with torch.no_grad():
-                    w = self.model.ent.weight.data
+                    w = self.model.ent.weight
                     denom = w.norm(p=2, dim=1, keepdim=True).clamp(min=1e-6)
-                    self.model.ent.weight.data = w / denom
+                    self.model.ent.weight.copy_(w / denom)
 
             with torch.no_grad():
-                r = self.model.rel.weight.data
+                r = self.model.rel.weight
                 denom_r = r.norm(p=2, dim=1, keepdim=True).clamp(min=1e-6)
-                self.model.rel.weight.data = r / denom_r
+                self.model.rel.weight.copy_(r / denom_r)
 
             avg_loss = epoch_loss / max(1, steps)
             print(f"[KGTrainer] Epoch {epoch}/{epochs} avg_loss={avg_loss:.6f}")
@@ -1132,8 +1132,9 @@ class KGTrainer:
                 ent_real = self._resize_embeddings(ent_real, self.model.ent.weight.shape, "RotatE nodes")
                 rel_real = self._resize_embeddings(rel_real, self.model.rel.weight.shape, "RotatE rels")
 
-            self.model.ent.weight.data = torch.tensor(ent_real, dtype=torch.float32, device=self.device)
-            self.model.rel.weight.data = torch.tensor(rel_real, dtype=torch.float32, device=self.device)
+            with torch.no_grad():
+                self.model.ent.weight.copy_(torch.tensor(ent_real, dtype=torch.float32, device=self.device))
+                self.model.rel.weight.copy_(torch.tensor(rel_real, dtype=torch.float32, device=self.device))
             print(f"[KGTrainer] loaded RotatE complex embeddings <- {node_in}, {rel_in}")
 
         else:
@@ -1149,6 +1150,7 @@ class KGTrainer:
                 ent_w = self._resize_embeddings(ent_w, self.model.ent.weight.shape, "nodes")
                 rel_w = self._resize_embeddings(rel_w, self.model.rel.weight.shape, "rels")
 
-            self.model.ent.weight.data = torch.tensor(ent_w, dtype=torch.float32, device=self.device)
-            self.model.rel.weight.data = torch.tensor(rel_w, dtype=torch.float32, device=self.device)
+            with torch.no_grad():
+                self.model.ent.weight.copy_(torch.tensor(ent_w, dtype=torch.float32, device=self.device))
+                self.model.rel.weight.copy_(torch.tensor(rel_w, dtype=torch.float32, device=self.device))
             print(f"[KGTrainer] loaded embeddings <- {node_in}, {rel_in}")
