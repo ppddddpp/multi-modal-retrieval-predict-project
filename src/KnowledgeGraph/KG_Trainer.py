@@ -405,16 +405,16 @@ class KGTrainer:
 
                 # write into embedding table
                 if replace:
-                    self.model.ent.weight.data[idx] = v_proj
+                    self.model.ent.weight[idx].copy_(v_proj)
                 else:
                     # additive: scale down a bit so it won't blow up norms
-                    self.model.ent.weight.data[idx] += v_proj * 0.5
+                    self.model.ent.weight[idx].add_(v_proj * 0.5)
 
                 injected += 1
 
         with torch.no_grad():
-            w = self.model.ent.weight.data
-            self.model.ent.weight.data = w / w.norm(p=2, dim=1, keepdim=True).clamp(min=1e-6)
+            w = self.model.ent.weight
+            self.model.ent.weight.copy_(w / w.norm(p=2, dim=1, keepdim=True).clamp(min=1e-6))
 
         if missing_keys:
             print(f"[KGTrainer] Note: {missing_keys} feature keys did not match any node2id entry and were skipped.")
