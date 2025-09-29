@@ -235,6 +235,11 @@ class Backbones(nn.Module):
             ).last_hidden_state
 
         return (img_global, img_patches), txt_feats
+    
+    def extract_global(self, image: torch.Tensor) -> torch.Tensor:
+        """Return only the global embedding (B, D)."""
+        (img_global, _), _ = self.forward(image)
+        return img_global
 
 class CrossModalFusion(nn.Module):
     """

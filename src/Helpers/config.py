@@ -30,6 +30,9 @@ class Config:
     kg_epochs: int = 30
     kg_weight: float = 0.1
     kg_mode: str = "hybrid"           # options: dataset | ontology | hybrid
+    kg_neg_size: int = 32
+    kg_adv_temp: float = 0.1
+    kg_use_amp: bool = True
 
     # CompGCN-specific (only used if kg_model=CompGCN)
     kg_num_layers: int = 2

@@ -22,6 +22,9 @@ kg_method: "cosine"
 kg_emb_dim: 400
 kg_epochs: 50
 kg_mode: "hybrid"   # options: dataset | ontology | hybrid
+kg_neg_size: 32
+kg_adv_temp: 0.1
+kg_use_amp: true
 
 # CompGCN-specific (only used if kg_model=CompGCN)
 kg_num_layers: 3

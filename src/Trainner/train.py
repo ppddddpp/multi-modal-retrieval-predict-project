@@ -206,18 +206,26 @@ if __name__ == '__main__':
         model_name=cfg.kg_model,
         model_kwargs=cfg.kg_model_kwargs,
     )
-
+    kg_feats_path = BASE_DIR / "knowledge_graph" / "kg_image_feats.pt"
     if not (BASE_DIR/"knowledge_graph"/"node_embeddings.npy").exists():
         print("Training Knowledge Graph embeddings...")
         kg_builder = KGBuilder(out_dir=BASE_DIR/"knowledge_graph", combined_groups=combined_groups)
         
-        KGBuilder.ensure_exists(XML_DIR, DICOM_ROOT, mode=KG_MODE)
-        kg_trainer.load_triples()   # assumes triples.csv already built
-        kg_trainer.train(epochs=cfg.kg_epochs, log_to_wandb=True)
+        KGBuilder.ensure_exists(
+            xml_dir=XML_DIR,
+            dicom_root=DICOM_ROOT,
+            mode=KG_MODE,
+            save_feats_path=str(kg_feats_path),
+            backbone_type=image_backbone,
+            device="cuda"
+        )
+
+        kg_trainer.load_triples(features_path=kg_feats_path)   # assumes triples.csv already built
+        kg_trainer.train(epochs=cfg.kg_epochs, log_to_wandb=True, negative_size=cfg.kg_neg_size, 
+                            advance_temp=cfg.kg_adv_temp, use_amp=cfg.kg_use_amp)
         kg_trainer.save_embeddings()
     else:
         print("Using cached KG embeddings")
-
 
     # --- Load best KG embeddings ---
     kg_dir = BASE_DIR / "knowledge_graph"
