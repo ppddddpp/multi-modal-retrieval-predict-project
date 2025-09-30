@@ -33,6 +33,7 @@ class Config:
     kg_neg_size: int = 32
     kg_adv_temp: float = 0.1
     kg_use_amp: bool = True
+    kg_lr : float = 1e-3
 
     # CompGCN-specific (only used if kg_model=CompGCN)
     kg_num_layers: int = 2

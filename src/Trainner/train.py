@@ -20,7 +20,7 @@ from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 from Helpers import kg_alignment_loss, contrastive_loss, Config, safe_roc_auc, safe_avg_precision
 from DataHandler.TripletGenerate import PseudoTripletDataset, LabelEmbeddingLookup
-from .train_label_attention import train_label_attention
+from train_label_attention import train_label_attention
 from KnowledgeGraph import KGBuilder, KGTrainer 
 import wandb
 import pandas as pd
@@ -207,6 +207,7 @@ if __name__ == '__main__':
         joint_dim=cfg.joint_dim,
         model_name=cfg.kg_model,
         model_kwargs=cfg.kg_model_kwargs,
+        lr=cfg.kg_lr,
     )
     kg_feats_path = BASE_DIR / "knowledge_graph" / "kg_image_feats.pt"
     if not (BASE_DIR/"knowledge_graph"/"node_embeddings.npy").exists():

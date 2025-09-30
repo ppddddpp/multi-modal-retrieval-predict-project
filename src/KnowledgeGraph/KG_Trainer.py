@@ -4,7 +4,7 @@ import csv
 import os
 import numpy as np
 import random
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Literal
 import datetime
 import time
 import torch
@@ -89,6 +89,8 @@ class CompGCNModel(nn.Module):
         self.n_nodes = n_nodes
         self.n_rels = n_rels
         self.emb_dim = emb_dim
+        self.higher_better = False
+        self.p = 1 
 
         # entity & relation embeddings
         self.ent = nn.Embedding(n_nodes, emb_dim)
@@ -286,21 +288,25 @@ class KGTrainer:
             self._inject_image_node_features(feats_path=str(feats_path), replace=True)
 
         # Create optimizer and include any extra params if present
-        opt_params = list(self.model.parameters())
-        if getattr(self, "image_feat_proj", None) is not None:
-            opt_params += list(self.image_feat_proj.parameters())
+        kg_lr = getattr(self, "kg_lr", self.lr)
+        opt_groups = [{"params": self.model.parameters(), "lr": kg_lr}]
 
-        # optimizer
         if getattr(self, "image_feat_proj", None) is not None:
-            self.optimizer = optim.Adam(
-                [
-                    {"params": self.model.parameters()},
-                    {"params": self.image_feat_proj.parameters(), "lr": self.lr * 0.1}
-                ],
-                lr=self.lr
-            )
-        else:
-            self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+            opt_groups.append({"params": self.image_feat_proj.parameters(), "lr": self.lr * 0.1})
+
+        self.optimizer = optim.Adam(opt_groups)
+
+        s, r, o, *_ = self.train_triples[0]
+        s_t = torch.tensor([s], device=self.device)
+        r_t = torch.tensor([r], device=self.device)
+        o_t = torch.tensor([o], device=self.device)
+        ents = torch.arange(self.model.ent.num_embeddings, device=self.device)
+
+        scores_tail = self.batched_scores(s_t, r_t, ents, mode="tail")
+        scores_head = self.batched_scores(o_t, r_t, ents, mode="head")
+
+        assert abs(scores_tail[0, o].item() - scores_head[0, s].item()) < 1e-5
+        print("Head/tail parity check passed successfully.")
 
     def _inject_image_node_features(self,
                                     feats_path: str = None,
@@ -502,38 +508,6 @@ class KGTrainer:
             x_all = None
             r_all = None
 
-            # --- Optional: precompute CompGCN propagated embeddings once per epoch ---
-            if self.model_name == "CompGCN":
-                # only precompute cached embeddings when NOT training (i.e. for eval)
-                if not self.model.training:
-                    with torch.no_grad():
-                        t0 = time.time()
-                        if torch.cuda.is_available():
-                            torch.cuda.synchronize()
-                        x_all, r_all = self.model(self.edge_index, self.edge_type)  # on device
-                        if torch.cuda.is_available():
-                            torch.cuda.synchronize()
-                        forward_time = time.time() - t0
-                    print(f"[KGTrainer] Precomputed CompGCN propagated embeddings (epoch start) in {forward_time:.2f}s")
-
-                    # Cache for reuse by probe_max_eval_batch / batched_scores / evaluate
-                    self._cached_x_all = x_all
-                    self._cached_r_all = r_all
-                    x_all = self._cached_x_all
-                    r_all = self._cached_r_all
-                else:
-                    # training: don't cache autograd graph, force per-batch forward
-                    self._cached_x_all = None
-                    self._cached_r_all = None
-                    x_all = None
-                    r_all = None
-            else:
-                self._cached_x_all = None
-                self._cached_r_all = None
-                # ensure local names exist for downstream code
-                x_all = None
-                r_all = None
-
             # instrumentation
             print_every = 10  # how often to print status (batches)
             batch_times = []
@@ -609,7 +583,11 @@ class KGTrainer:
                         neg_scores_all = self.model.score(s_flat, r_flat, o_flat).view(B, neg_size)
 
                     # adversarial weighting + loss
-                    weights = F.softmax(neg_scores_all / adv_temp, dim=1).detach()
+                    if getattr(self.model, "higher_better", False):
+                        weights = F.softmax(neg_scores_all / adv_temp, dim=1).detach()
+                    else:
+                        weights = F.softmax(-neg_scores_all / adv_temp, dim=1).detach()
+
                     neg_score = (weights * neg_scores_all).sum(dim=1)
                     
                     if loss_type == "logsigmoid":
@@ -657,6 +635,23 @@ class KGTrainer:
                     moving_avg = batch_time
                 else:
                     moving_avg = 0.9 * moving_avg + 0.1 * batch_time
+
+                # --- debugging scalars ---
+                pos_mean = float(pos_scores.mean().detach().cpu().item())
+                neg_mean = float(neg_scores_all.mean().detach().cpu().item())
+                neg_weight_entropy = float((- (weights * (weights + 1e-12).log()).sum(dim=1)).mean().detach().cpu().item())
+
+                if log_to_wandb and ((step + 1) % print_every == 0 or (step + 1) == steps):
+                    try:
+                        wandb.log({
+                            "kg/pos_score_mean": pos_mean,
+                            "kg/neg_score_mean": neg_mean,
+                            "kg/neg_weight_entropy": neg_weight_entropy,
+                            "kg/epoch": epoch,
+                            "kg/batch_idx": step+1,
+                        })
+                    except Exception as e:
+                        print(f"[WARN] wandb.log failed (pos/neg): {e}")
 
                 if (step + 1) % print_every == 0 or (step + 1) == steps:
                     batches_left = steps - (step + 1)
@@ -760,7 +755,7 @@ class KGTrainer:
                             max_batch: int = 1 << 20,
                             safety_factor: float = 0.9,
                             max_trials: int = 20,
-                            target_util: float = 0.4) -> int:
+                            target_util: float = 0.2) -> int:
         """
         Find the largest candidate-chunk size that can be scored without OOM,
         for a batch of (s, r) queries at once, and then scale it up so that
@@ -774,7 +769,7 @@ class KGTrainer:
             max_batch: absolute upper limit.
             safety_factor: fraction to apply to the found maximum.
             max_trials: number of probing attempts.
-            target_util: target GPU memory utilization (e.g. 0.4 => 40%).
+            target_util: target GPU memory utilization (e.g. 0.2 => 20%).
 
         Returns:
             suggested candidate batch size (int).
@@ -904,12 +899,22 @@ class KGTrainer:
                     use_amp: Optional[bool] = None,
                     x_all: Optional[torch.Tensor] = None,
                     r_all: Optional[torch.Tensor] = None,
-                    show_progress: bool = False):
+                    show_progress: bool = False,
+                    mode: Literal["tail", "head"] = "tail"):
         """
-        Compute scores for (s, r, candidates) in batch mode.
+        Compute scores for queries in batch mode.
 
-        - If s_t and r_t are vectors of length B, computes scores for each query
-        in parallel, returning shape (B, num_candidates).
+        Args:
+            s_t: for mode="tail": subject indices (B,)
+                for mode="head": object indices (B,)  <-- IMPORTANT: interpret s_t as objects when mode="head"
+            r_t: relation indices (B,)
+            candidates: 1D tensor of candidate entity ids (N,)
+            batch_size: candidate chunk size
+            x_all, r_all: optional precomputed propagated embeddings (CompGCN fast-path)
+            mode: "tail" -> score (s, r, candidates)  (default)
+                "head" -> score (candidates, r, o) where s_t is treated as o (objects)
+        Returns:
+            Tensor of shape (B, N) with distances/scores.
         """
 
         device = self.device
@@ -917,7 +922,7 @@ class KGTrainer:
             use_amp = torch.cuda.is_available()
         use_amp = bool(use_amp) and torch.cuda.is_available()
 
-        # ensure tensors
+        # ensure tensors on device
         if not isinstance(candidates, torch.Tensor):
             candidates = torch.as_tensor(candidates, dtype=torch.long, device=device)
         else:
@@ -949,33 +954,63 @@ class KGTrainer:
                 for start in iter_ranges:
                     end = min(start + batch_size, N)
                     cand_chunk = candidates[start:end]  # (C,)
+                    C = cand_chunk.numel()
 
+                    # --- Fast path: have precomputed propagated embeddings (CompGCN) ---
                     if self.model_name == "CompGCN" and x_all is not None and r_all is not None:
-                        # Precomputed embeddings available
-                        e_s = x_all[s_t]        # (B, d)
-                        r_vec = r_all[r_t]      # (B, d)
-                        e_o = x_all[cand_chunk] # (C, d)
+                        if mode == "tail":
+                            # tail: scores for (s_t, r_t, cand_chunk)
+                            e_s = x_all[s_t]           # (B, d)
+                            r_vec = r_all[r_t]         # (B, d)
+                            e_o = x_all[cand_chunk]    # (C, d)
+                            diff = e_s.unsqueeze(1) + r_vec.unsqueeze(1) - e_o.unsqueeze(0)  # (B, C, d)
+                        else:  # mode == "head"
+                            # head: scores for (cand_chunk, r_t, o_batch) where s_t is o_batch
+                            e_o_batch = x_all[s_t]     # (B, d)  (s_t holds o_batch in head-mode)
+                            r_vec = r_all[r_t]         # (B, d)
+                            e_c = x_all[cand_chunk]    # (C, d)
+                            diff = e_c.unsqueeze(0) + r_vec.unsqueeze(1) - e_o_batch.unsqueeze(1)  # (B, C, d)
 
-                    elif self.model_name == "CompGCN":
-                        # No cache → recompute full forward each time
-                        s_rep = s_t.repeat_interleave(len(cand_chunk))
-                        r_rep = r_t.repeat_interleave(len(cand_chunk))
-                        o_rep = cand_chunk.repeat(B)
-                        scores = self.model.score(s_rep, r_rep, o_rep,
-                                                getattr(self, "edge_index", None),
-                                                getattr(self, "edge_type", None))
-                        results.append(scores.view(B, -1))
+                        p = getattr(self.model, "p", 2)
+                        scores = torch.norm(diff, p=p, dim=2)  # (B, C)
+                        results.append(scores)
                         continue
-                    else:
-                        # Vanilla models
+
+                    # --- No-cache CompGCN path: call model.score on flattened lists ---
+                    if self.model_name == "CompGCN" and (x_all is None or r_all is None):
+                        if mode == "tail":
+                            # want scores for (s_i, r_i, o_c) for each i in [0..B-1], c in [0..C-1]
+                            s_rep = s_t.repeat_interleave(C)            # (B*C,)
+                            r_rep = r_t.repeat_interleave(C)            # (B*C,)
+                            o_rep = cand_chunk.repeat(B)                # (B*C,)
+                        else:
+                            # mode == "head": s_t is o_batch; want scores (cand_c, r_i, o_i)
+                            s_rep = cand_chunk.repeat(B)                # (B*C,)
+                            r_rep = r_t.repeat_interleave(C)           # (B*C,)
+                            o_rep = s_t.repeat_interleave(C)           # (B*C,)
+
+                        scores_flat = self.model.score(s_rep, r_rep, o_rep,
+                                                    getattr(self, "edge_index", None),
+                                                    getattr(self, "edge_type", None))
+                        # reshape to (B, C) in query-major order
+                        results.append(scores_flat.view(B, -1))
+                        continue
+
+                    # --- Vanilla models (no GCN) ---
+                    if mode == "tail":
                         e_s = self.model.ent(s_t)        # (B, d)
                         r_vec = self.model.rel(r_t)      # (B, d)
                         e_o = self.model.ent(cand_chunk) # (C, d)
+                        diff = e_s.unsqueeze(1) + r_vec.unsqueeze(1) - e_o.unsqueeze(0)  # (B, C, d)
+                    else:
+                        # head mode: s_t is o_batch
+                        e_o_batch = self.model.ent(s_t)      # (B, d)
+                        r_vec = self.model.rel(r_t)          # (B, d)
+                        e_c = self.model.ent(cand_chunk)     # (C, d)
+                        diff = e_c.unsqueeze(0) + r_vec.unsqueeze(1) - e_o_batch.unsqueeze(1)  # (B, C, d)
 
-                    # Vectorized scoring (B, C, d) → (B, C)
-                    diff = e_s.unsqueeze(1) + r_vec.unsqueeze(1) - e_o.unsqueeze(0)
                     p = getattr(self.model, "p", 2)
-                    scores = torch.norm(diff, p=p, dim=2)
+                    scores = torch.norm(diff, p=p, dim=2)  # (B, C)
                     results.append(scores)
 
         out = torch.cat(results, dim=1)  # (B, N)
@@ -999,6 +1034,24 @@ class KGTrainer:
         t_eval_start = time.time()
 
         with torch.no_grad():
+            x_all = getattr(self, "_cached_x_all", None)
+            r_all = getattr(self, "_cached_r_all", None)
+
+            if self.model_name == "CompGCN" and (x_all is None or r_all is None):
+                with torch.no_grad():
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    t0 = time.time()
+                    x_all, r_all = self.model(self.edge_index, self.edge_type)  # on device
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    t_fwd = time.time() - t0
+                # cache them for reuse during this evaluate call (and optionally future calls)
+                self._cached_x_all = x_all
+                self._cached_r_all = r_all
+                # optional debug print
+                print(f"[KGTrainer] Computed CompGCN propagated embeddings for evaluate() in {t_fwd:.3f}s")
+
             all_entities = torch.arange(self.model.ent.num_embeddings, device=device)
 
             # --- probe candidate batch size automatically if not set ---
@@ -1025,10 +1078,9 @@ class KGTrainer:
                 o_batch = torch.tensor([o for _, _, o, _, _ in batch], device=device)
 
                 # --- Tail prediction: (s, r, ?)
-                scores_tail = self.batched_scores(
-                    s_batch, r_batch, all_entities,
-                    batch_size=cand_batch_size, use_amp=use_amp
-                )  # (B, num_entities)
+                scores_tail = self.batched_scores(s_batch, r_batch, all_entities,
+                        batch_size=cand_batch_size, use_amp=use_amp, mode="tail",
+                        x_all=x_all, r_all=r_all) # (B, num_entities)
 
                 for i, (s, r, o, _, _) in enumerate(batch):
                     known_tails = [obj for (ss, rr, obj) in all_known if ss == s and rr == r and obj != o]
@@ -1047,10 +1099,9 @@ class KGTrainer:
                     ranks.append(rank_tail)
 
                 # --- Head prediction: (?, r, o)
-                scores_head = self.batched_scores(
-                    o_batch, r_batch, all_entities,
-                    batch_size=cand_batch_size, use_amp=use_amp
-                )  # (B, num_entities)
+                scores_head = self.batched_scores(o_batch, r_batch, all_entities,
+                    batch_size=cand_batch_size, use_amp=use_amp, mode="head",
+                    x_all=x_all, r_all=r_all) # (B, num_entities)
 
                 for i, (s, r, o, _, _) in enumerate(batch):
                     known_heads = [ss for (ss, rr, obj) in all_known if rr == r and obj == o and ss != s]
