@@ -9,12 +9,12 @@ import datetime
 import time
 import torch
 import torch.nn as nn
+import torch.amp as amp
 import torch.optim as optim
-from tqdm import tqdm
 import torch.nn.functional as F
 from .compgcn_conv import CompGCNConv
 import wandb
-import torch.amp as amp
+from tqdm import tqdm
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 KG_DIR = BASE_DIR / "knowledge_graph"

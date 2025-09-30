@@ -19,6 +19,8 @@ from Model import MultiModalRetrievalModel
 from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 from Helpers import kg_alignment_loss, contrastive_loss, Config, safe_roc_auc, safe_avg_precision
+from DataHandler.TripletGenerate import PseudoTripletDataset, LabelEmbeddingLookup
+from .train_label_attention import train_label_attention
 from KnowledgeGraph import KGBuilder, KGTrainer 
 import wandb
 import pandas as pd
@@ -610,5 +612,27 @@ if __name__ == '__main__':
 
     with open(EMBED_SAVE_PATH / "train_ids.json", "w") as f:
         json.dump(train_ids, f)
+
+    # Train LabelAttention
+    report_ids = [r["id"] for r in train_records]
+    MODEL_LA_DIR = BASE_DIR / "label attention model"
+
+    if not (MODEL_LA_DIR / "label_attention_model.pt").exists():
+        print("Training LabelAttention pooling...")
+        pseudo_dataset = PseudoTripletDataset(report_ids, labels_df, min_overlap=0.5)
+        label_lookup = LabelEmbeddingLookup(kg_dir=BASE_DIR/"knowledge_graph")
+        emb_sample = label_lookup.get_label_embs(report_ids[0])
+        d_emb_actual = emb_sample.shape[1]
+        model_attn = train_label_attention(
+            pseudo_dataset,
+            label_lookup,
+            d_emb=d_emb_actual,
+            hidden=64,
+            batch_size=32,
+            epochs=10,
+            lr=1e-3
+        )
+    else:
+        print("Using cached LabelAttention model")
 
     print("Done.")

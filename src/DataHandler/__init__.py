@@ -7,6 +7,7 @@ from .stat_utils import RawStatDataset
 from .tensorDICOM import DICOMImagePreprocessor
 from .train_val_split import train_val_test_split
 from .verify_labels_with_gemini import run_gemini_label_verifier, OpenIChecker
+from .TripletGenerate import PseudoTripletDataset, LabelEmbeddingLookup
 
 __all__ = [
     "ChestXRDataset",
@@ -19,5 +20,7 @@ __all__ = [
     "DICOMImagePreprocessor",
     "train_val_test_split",
     "run_gemini_label_verifier",
-    "OpenIChecker"
+    "OpenIChecker",
+    "PseudoTripletDataset",
+    "LabelEmbeddingLookup"
 ]
