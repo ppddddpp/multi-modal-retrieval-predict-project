@@ -226,7 +226,8 @@ if __name__ == '__main__':
         kg_trainer.save_embeddings()
     else:
         print("Using cached KG embeddings")
-
+    
+    torch.cuda.empty_cache()
     # --- Load best KG embeddings ---
     kg_dir = BASE_DIR / "knowledge_graph"
 

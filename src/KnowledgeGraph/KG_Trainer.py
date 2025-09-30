@@ -760,7 +760,7 @@ class KGTrainer:
                             max_batch: int = 1 << 20,
                             safety_factor: float = 0.9,
                             max_trials: int = 20,
-                            target_util: float = 0.7) -> int:
+                            target_util: float = 0.4) -> int:
         """
         Find the largest candidate-chunk size that can be scored without OOM,
         for a batch of (s, r) queries at once, and then scale it up so that
@@ -774,7 +774,7 @@ class KGTrainer:
             max_batch: absolute upper limit.
             safety_factor: fraction to apply to the found maximum.
             max_trials: number of probing attempts.
-            target_util: target GPU memory utilization (e.g. 0.7 => 70%).
+            target_util: target GPU memory utilization (e.g. 0.4 => 40%).
 
         Returns:
             suggested candidate batch size (int).
