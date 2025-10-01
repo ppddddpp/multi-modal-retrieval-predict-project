@@ -23,9 +23,9 @@ kg_emb_dim: 200
 kg_epochs: 50
 kg_mode: "hybrid"   # options: dataset | ontology | hybrid
 kg_neg_size: 32
-kg_adv_temp: 0.5
+kg_adv_temp: 0.2
 kg_use_amp: true
-kg_lr : 1e-3
+kg_lr : 5e-4
 
 # CompGCN-specific (only used if kg_model=CompGCN)
 kg_num_layers: 2
@@ -35,8 +35,8 @@ kg_opn: "corr"           # options: sub | mult | corr
 
 # Loss parameters
 cls_weight: 3.5
-cont_weight: 0.12
-kg_weight: 0.15
+cont_weight: 0.2
+kg_weight: 0.5
 weight_img_joint : 0.5
 weight_text_joint : 0.5
 gamma_focal: 1

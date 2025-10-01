@@ -1146,7 +1146,20 @@ class KGTrainer:
             rel_w = r.detach().cpu().numpy()
             np.save(node_out, ent_w)
             np.save(rel_out, rel_w)
+            # save metadata as well (important for later restores)
+            meta = {
+                "model_name": self.model_name,
+                "emb_dim": self.emb_dim,
+                "n_nodes": ent_w.shape[0],
+                "n_rels": rel_w.shape[0],
+                "ent_shape": list(ent_w.shape),
+                "rel_shape": list(rel_w.shape),
+                "higher_better": getattr(self.model, "higher_better", False),
+            }
+            with meta_out.open("w") as f:
+                json.dump(meta, f, indent=2)
             print(f"[KGTrainer] saved CompGCN propagated embeddings -> {node_out}, {rel_out}")
+            print(f"[KGTrainer] saved metadata -> {meta_out}")
             return  # skip the rest of save logic
 
         if self.model_name == "RotatE":

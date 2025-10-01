@@ -521,6 +521,13 @@ if __name__ == '__main__':
         macro_prec = float(precision_score(y_true, y_bin, average='macro', zero_division=0))
         macro_rec  = float(recall_score(y_true, y_bin, average='macro', zero_division=0))
 
+        print(f"Epoch {epoch} | Val AUC: {macro_auc:.4f} | Val AP: {macro_ap:.4f}" 
+                f" | Val F1: {macro_f1:.4f} | Val Prec: {macro_prec:.4f} | Val Rec: {macro_rec:.4f}" 
+                f" | Val Micro AP: {micro_ap:.4f} | Val Micro F1: {micro_f1:.4f}" 
+                f" | Val Micro Prec: {micro_prec:.4f} | Val Micro Rec: {micro_rec:.4f}" 
+                f" | Train Loss: {avg_train_loss:.4f} | Val Accuracy: {float(accuracy_score(y_true, y_bin)):.4f}" 
+            )
+
         val_metrics = {
             "val_auc_macro": macro_auc,
             "val_ap_macro": macro_ap,
@@ -620,8 +627,11 @@ if __name__ == '__main__':
 
     if not (MODEL_LA_DIR / "label_attention_model.pt").exists():
         print("Training LabelAttention pooling...")
-        pseudo_dataset = PseudoTripletDataset(report_ids, labels_df, min_overlap=0.5)
-        label_lookup = LabelEmbeddingLookup(kg_dir=BASE_DIR/"knowledge_graph")
+        pseudo_dataset = PseudoTripletDataset(labels_df, min_overlap=0.5)
+
+        label_emb_dict = torch.load(BASE_DIR / "knowledge_graph/label_embeddings.pt")
+        label_lookup = LabelEmbeddingLookup(labels_df, label_emb_dict, device="cuda")
+        
         emb_sample = label_lookup.get_label_embs(report_ids[0])
         d_emb_actual = emb_sample.shape[1]
         model_attn = train_label_attention(
