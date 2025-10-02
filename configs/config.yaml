@@ -3,6 +3,7 @@ epochs:    50
 patience:  10
 batch_size: 8
 lr:        2e-5
+seed:      2709
 
 # Model parameters
 num_fusion_layers: 5
@@ -23,15 +24,14 @@ kg_emb_dim: 200
 kg_epochs: 50
 kg_mode: "hybrid"   # options: dataset | ontology | hybrid
 kg_neg_size: 32
-kg_adv_temp: 0.2
+kg_adv_temp: 0.5
 kg_use_amp: true
-kg_lr : 5e-4
+kg_lr : 1e-3
 
 # CompGCN-specific (only used if kg_model=CompGCN)
 kg_num_layers: 2
 kg_dropout: 0.25
 kg_opn: "corr"           # options: sub | mult | corr
-
 
 # Loss parameters
 cls_weight: 3.5

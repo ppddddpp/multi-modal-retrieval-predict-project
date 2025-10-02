@@ -10,6 +10,7 @@ class Config:
     patience: int = 10
     batch_size: int = 32
     lr: float = 2e-5
+    seed: int = 2709
 
     # Model parameters
     num_fusion_layers: int = 5

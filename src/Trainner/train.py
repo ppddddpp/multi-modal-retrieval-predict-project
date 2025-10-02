@@ -10,6 +10,7 @@ import json
 import torch
 import numpy as np
 import pandas as pd
+import random
 import torch.nn as nn
 from tqdm import tqdm
 from sklearn.metrics import average_precision_score, f1_score, precision_recall_curve, precision_score, recall_score, accuracy_score
@@ -21,7 +22,8 @@ from LabelData import disease_groups, normal_groups, finding_groups, symptom_gro
 from Helpers import kg_alignment_loss, contrastive_loss, Config, safe_roc_auc, safe_avg_precision
 from DataHandler.TripletGenerate import PseudoTripletDataset, LabelEmbeddingLookup
 from train_label_attention import train_label_attention
-from KnowledgeGraph import KGBuilder, KGTrainer 
+from KnowledgeGraph import KGBuilder, KGTrainer
+from KnowledgeGraph.kg_label_create import ensure_label_embeddings
 import wandb
 import pandas as pd
 from dotenv import load_dotenv
@@ -46,6 +48,13 @@ os.environ['TRANSFORMERS_CACHE'] = str(MODEL_DIR)
 
 # --- Config ---
 cfg = Config.load(CONFIG_DIR / 'config.yaml')
+
+torch.manual_seed(cfg.seed)
+np.random.seed(cfg.seed)
+random.seed(cfg.seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(cfg.seed)
+
 EPOCHS = cfg.epochs
 PATIENCE = cfg.patience 
 BATCH_SIZE = cfg.batch_size
@@ -629,7 +638,7 @@ if __name__ == '__main__':
         print("Training LabelAttention pooling...")
         pseudo_dataset = PseudoTripletDataset(labels_df, min_overlap=0.5)
 
-        label_emb_dict = torch.load(BASE_DIR / "knowledge_graph/label_embeddings.pt")
+        label_emb_dict = ensure_label_embeddings(BASE_DIR)
         label_lookup = LabelEmbeddingLookup(labels_df, label_emb_dict, device="cuda")
         
         emb_sample = label_lookup.get_label_embs(report_ids[0])
