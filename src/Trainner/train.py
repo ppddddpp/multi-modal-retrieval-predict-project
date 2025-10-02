@@ -638,19 +638,29 @@ if __name__ == '__main__':
         print("Training LabelAttention pooling...")
         pseudo_dataset = PseudoTripletDataset(labels_df, min_overlap=0.5)
 
-        label_emb_dict = ensure_label_embeddings(BASE_DIR)
+        try:
+            print("Loading label embeddings...")
+            label_emb_dict = ensure_label_embeddings(BASE_DIR)
+            print("Done.")
+        except Exception as e:
+            print("[ERROR] ensure_label_embeddings failed:", e)
+            import traceback; traceback.print_exc()
+            sys.exit(1)
+        
         label_lookup = LabelEmbeddingLookup(labels_df, label_emb_dict, device="cuda")
         
         emb_sample = label_lookup.get_label_embs(report_ids[0])
         d_emb_actual = emb_sample.shape[1]
+
         model_attn = train_label_attention(
             pseudo_dataset,
             label_lookup,
             d_emb=d_emb_actual,
-            hidden=64,
-            batch_size=32,
-            epochs=10,
-            lr=1e-3
+            hidden=cfg.la_hidden_dim,
+            batch_size=cfg.la_batch_size,
+            epochs=cfg.la_epochs,
+            lr=cfg.la_lr,
+            patience=cfg.la_patience,
         )
     else:
         print("Using cached LabelAttention model")

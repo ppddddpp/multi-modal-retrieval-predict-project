@@ -50,6 +50,13 @@ class Config:
     focal_ratio: float = 0.3
     temperature: float = 0.125
 
+    # Label aware parameters
+    la_hidden_dim: int = 256
+    la_batch_size: int = 128
+    la_epochs: int = 30
+    la_lr: float = 5e-4
+    la_patience: int = 5
+
     # Wandb parameters
     project_name: str = "multimodal-disease-classification-2609-experiments"
 

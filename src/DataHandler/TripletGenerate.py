@@ -1,5 +1,6 @@
 import random
 import torch
+from tqdm import tqdm
 from torch.utils.data import Dataset
 
 class PseudoTripletDataset(Dataset):
@@ -29,7 +30,7 @@ class PseudoTripletDataset(Dataset):
 
     def _build_triplets(self):
         triplets = []
-        for qid in self.report_ids:
+        for qid in tqdm(self.report_ids, desc="Building triplets"):
             q_labels = self._get_labels(qid)
             if not q_labels:  # skip empty label sets
                 continue

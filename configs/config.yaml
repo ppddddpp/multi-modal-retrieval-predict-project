@@ -43,5 +43,12 @@ gamma_focal: 1
 focal_ratio: 0.3
 temperature: 0.125
 
+# Label aware parameters
+la_hidden_dim: 256
+la_batch_size: 128
+la_epochs: 30
+la_lr: 5e-4
+la_patience: 5
+
 # Wandb parameters
 project_name: "multimodal-disease-classification-2609-experiments"
