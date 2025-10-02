@@ -427,7 +427,23 @@ class MultiModalRetrievalModel(nn.Module):
                 K: int = 5,
                 explain: bool = False
                 ) -> dict:
-        
+        """
+        Predicts the output of the model given input image and text features.
+
+        Parameters:
+
+            image (torch.Tensor): Input image tensor of shape (B, C, H, W).
+            input_ids (torch.Tensor): Input text tensor of shape (B, T).
+            attention_mask (torch.Tensor): Attention mask tensor of shape (B, T).
+            threshold (float): Threshold value for binary classification predictions.
+            K (int): Number of top predictions to return.
+            explain (bool): Whether to return explanation maps.
+
+        Returns:
+            dict: A dictionary containing the predicted probabilities, binary
+                predictions, top-K values, top-K indices, and explanation maps if
+                explain is True.
+        """
         joint_emb, logits, attn_weights = self.forward(
             image, input_ids, attention_mask, return_attention=explain
         )
@@ -502,6 +518,26 @@ class MultiModalRetrievalModel(nn.Module):
         targets: list,
         K: int = 5
     ) -> dict:
+        """
+        Computes explanation maps for a single input using three methods.
+
+        Args:
+            image: torch.Tensor of shape (B, C, H, W)
+            input_ids: torch.Tensor of shape (B, T)
+            attention_mask: torch.Tensor of shape (B, T)
+            joint_emb: torch.Tensor of shape (B, D)
+            attn_weights: dict with attention weights from fusion layer
+            targets: single int or list of ints for the class indices to explain
+            K: int, number of nearest neighbours to retrieve
+
+        Returns:
+            dict with five keys:
+                - 'retrieval_ids': nearest neighbours (K,)
+                - 'retrieval_dists': distances of nearest neighbours (K,)
+                - 'attention_map': (H, W) attention map over image patches
+                - 'ig_maps': dict of target to (H, W) IG map over image patches
+                - 'gradcam_maps': dict of target to (H, W) Grad-CAM map over image patches
+        """
         # Case-based retrieval again as part of explanation
         q_emb = joint_emb.detach().cpu().numpy()
         retr_ids, retr_dists = self.retriever.retrieve(q_emb, K=K)

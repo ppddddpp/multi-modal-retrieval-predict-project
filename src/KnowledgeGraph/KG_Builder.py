@@ -160,6 +160,25 @@ class KGBuilder:
 
     # ---------- ontology mapping triples ----------
     def add_ontology_mapping(self, mapping_path: Path):
+        """
+        Add ontology mapping triples from a JSON file.
+
+        The mapping file should contain a nested dictionary where the
+        outer keys are group names (e.g. "disease", "symptom", etc.),
+        the inner keys are label names, and the inner values are the
+        corresponding ontology IDs.
+
+        For each label in the mapping, a triple will be added with
+        the form (label, MAPPED_TO, ontology_node), where
+        ontology_node is the normalized ontology node name.
+
+        Additionally, if the ontology node has synonyms in the
+        ontology metadata, triples of the form (synonym, SYNONYM_OF, ontology_node)
+        will be added.
+
+        :param mapping_path: Path to the ontology mapping JSON file
+        :return: None
+        """
         if not mapping_path.exists():
             print(f"[KGBuilder] Mapping file not found: {mapping_path}")
             return
@@ -194,6 +213,19 @@ class KGBuilder:
 
     # ---------- ontology-native triples ----------
     def add_doid(self, doid_path: Path):
+        """
+        Add Disease Ontology (DOID) triples to the knowledge graph.
+
+        The DOID ontology is parsed from a given file path, and the
+        following triples are added to the knowledge graph:
+        - (label, MAPPED_TO, ontology_node)
+        - (synonym, SYNONYM_OF, ontology_node)
+        - (ontology_node, XREF, xref_node)
+        - (ontology_node, IS_A, parent_node)
+
+        :param doid_path: Path to the DOID ontology file
+        :return: None
+        """
         if not doid_path.exists():
             print(f"[KGBuilder] DOID not found: {doid_path}")
             return
@@ -258,6 +290,13 @@ class KGBuilder:
         print(f"[KGBuilder] DOID triples added: {len(self.triples)}")
 
     def add_radlex(self, radlex_path: Path):
+        """
+        Add RadLex ontology triples to the Knowledge Graph.
+
+        :param radlex_path: path to the RadLex OWL file
+        :return: None
+        """
+        
         if not radlex_path.exists():
             print(f"[KGBuilder] RadLex not found: {radlex_path}")
             return
@@ -298,6 +337,27 @@ class KGBuilder:
 
     # ---------- curated CSV ----------
     def add_curated_csv(self, csv_path: str):
+        """
+        Add curated triples from a CSV file to the Knowledge Graph.
+
+        :param csv_path: path to the CSV file containing the triples
+        :return: None
+
+        The CSV file should contain columns 's', 'r', 'o' and optionally 'confidence'.
+        The 'confidence' column is used to set the confidence of the added triples.
+        If the 'confidence' column is not present, the confidence is set to 1.0.
+
+        The added triples are labeled with "curated" as their source.
+
+        Example CSV:
+
+        s,r,o,confidence
+        disease:123, has_symptom, symptom:456, 0.5
+        disease:123, has_symptom, symptom:789, 0.8
+
+        This would add two triples: (disease:123, has_symptom, symptom:456, 0.5, "curated") and
+        (disease:123, has_symptom, symptom:789, 0.8, "curated")
+        """
         p = Path(csv_path)
         if not p.exists():
             raise FileNotFoundError(csv_path)
@@ -350,7 +410,18 @@ class KGBuilder:
                 curated_csv: Optional[str] = None, mode: str = "hybrid",
                 save_feats_path: Optional[str] = None, backbone_type: str = "swin", device: str = "cuda"):
         """
-        mode: "dataset", "ontology", "hybrid"
+        Main entrypoint to build the Knowledge Graph.
+
+        - mode: "dataset" => build from parsed records only.
+        - mode: "ontology" => build from ontology files only.
+        - mode: "hybrid" => build from parsed records and add ontology mappings.
+
+        - xml_dir, dicom_root: as before (records should include an identifier to map to dcm file)
+        - save_feats_path: path to save the feature dict (torch .pt recommended)
+        - backbone_type: model name passed to Backbones
+        - device: 'cpu' or 'cuda'
+
+        - curated_csv: path to a curated CSV file with triples (s, r, o, conf, src)
         """
         if mode == "dataset":
             self.build_from_parsed(xml_dir=xml_dir, dicom_root=dicom_root, save_feats_path=save_feats_path, 

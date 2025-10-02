@@ -100,7 +100,10 @@ class DLSRetrievalEngine(RetrievalEngine):
 
     def _build_link_graph(self, threshold: float, max_links: int) -> List[List[int]]:
         """
-        Build an adjacency list of each node’s top-similarity neighbors above threshold.
+        Builds a dense link graph based on cosine similarity above a given threshold.
+        Each node is associated with a list of its max_links most similar neighbors.
+        The result is a list of lists of node indices, where each inner list represents
+        the neighbors of a node in descending order of similarity.
         """
         sim = cosine_similarity(self.embs)        # (N, N)
         np.fill_diagonal(sim, -1)                 # ignore self-similarity
@@ -126,10 +129,29 @@ class DLSRetrievalEngine(RetrievalEngine):
         rerank_topk: Optional[int] = None
     ) -> Tuple[List[str], List[float]]:
         """
-        Sublinear DLS retrieval via greedy graph-walk using a heap-based candidate pool.
+        Retrieves top-K IDs and their scores based on a query embedding.
 
-        Optional reranker: pass a Reranker instance and query_id (str) to perform final reranking.
-        If reranker is provided, it will be called with the top candidates and their embeddings.
+        - First generates a set of seed nodes based on cosine similarity.
+        - Then performs a greedy graph walk to expand the set of nodes.
+        - Finally sorts the nodes by their similarity and returns the top-K.
+
+        Optional reranking can be performed using a Reranker object.
+        This reranks the top-K candidates based on a combination of
+        embedding cosine, label Jaccard, and KG-based cosine.
+
+        Parameters:
+        - query_emb: query embedding (D,) or (1,D)
+        - K: number of top candidates to return (default 5)
+        - seed_size: initial number of seed nodes (default 5)
+        - max_steps: maximum number of steps in the greedy graph walk (default 100)
+        - candidate_multiplier: multiplier for heap size (default 10)
+        - reranker: optional Reranker object for reranking (default None)
+        - query_id: optional query ID for reranking (default None)
+        - rerank_topk: optional number of top candidates to rerank (default None)
+
+        Returns:
+        - A list of top-K IDs
+        - A list of top-K scores
         """
         q = query_emb.astype("float32").reshape(-1)
         N = self.embs.shape[0]
@@ -222,6 +244,21 @@ def make_retrieval_engine(
     method: str = "dls",
     **kwargs
 ) -> RetrievalEngine:
+    """
+    Returns a RetrievalEngine object based on the method specified.
+
+    Parameters:
+    - features_path: path to the embedding features file (numpy .npy file)
+    - ids_path: path to the IDs file (json file with list of IDs)
+    - method: string specifying the retrieval method (default "dls")
+    - link_threshold: float specifying the minimum cosine similarity for a link (default 0.5)
+    - max_links: int specifying the maximum number of links per node (default 10)
+    - fdb_path: path to the link graph file (pickle file, default None)
+    - name: string specifying the name of the retrieval engine (default None)
+
+    Returns:
+    - A RetrievalEngine object based on the specified method
+    """
     method = method.lower()
     if method == "dls":
         return DLSRetrievalEngine(

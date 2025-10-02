@@ -20,22 +20,37 @@ MODEL_DIR = BASE_DIR / "label attention model"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 def train_label_attention(
-    dataset,                # PseudoTripletDataset
-    label_lookup,           # LabelEmbeddingLookup
-    d_emb,                  # dimension of label embeddings
+    dataset,
+    label_lookup,
+    d_emb,
     hidden=64,
     batch_size=32,
     epochs=20,
     lr=1e-3,
-    patience=3,             # early stop if no improvement this many epochs
-    save_path=None,         # pass a custom path if you want
-    device="cuda" if torch.cuda.is_available() else "cpu"
+    patience=3,
+    save_path=None,
+    device="cuda" if torch.cuda.is_available() else "cpu",
+    log_to_wandb=False
 ):
     """
-    Train LabelAttention on (pseudo) triplets of reports.
-    By default saves best weights to BASE_DIR/models/label_attention_model.pt
+    Train a LabelAttention model.
+
+    Args:
+        dataset (torch.utils.data.Dataset): The dataset to train on.
+        label_lookup (LabelEmbeddingLookup): The label lookup object.
+        d_emb (int): The dimensionality of the embeddings.
+        hidden (int, optional): The number of hidden units in the model. Defaults to 64.
+        batch_size (int, optional): The batch size. Defaults to 32.
+        epochs (int, optional): The number of epochs to train for. Defaults to 20.
+        lr (float, optional): The learning rate. Defaults to 1e-3.
+        patience (int, optional): The patience for early stopping. Defaults to 3.
+        save_path (str, optional): The path to save the model to. Defaults to None, which means the model is saved to MODEL_DIR / "label_attention_model.pt".
+        device (str, optional): The device to use. Defaults to "cuda" if available, otherwise "cpu".
+        log_to_wandb (bool, optional): Whether to log to Weights and Biases. Defaults to False.
+
+    Returns:
+        LabelAttention: The trained model.
     """
-    # choose default save path if not provided
     if save_path is None:
         save_path = MODEL_DIR / "label_attention_model.pt"
 
@@ -57,7 +72,7 @@ def train_label_attention(
 
             for qid, pid, nid in zip(qids, pids, nids):
                 def get_and_mask(rid):
-                    emb = label_lookup.get_label_embs(rid)  # [n_labels,d]
+                    emb = label_lookup.get_label_embs(rid)  # [n_labels, d]
                     mask = torch.ones((emb.shape[0],), dtype=torch.bool)
                     return emb, mask
                 q_embs, q_mask = get_and_mask(qid)
@@ -100,19 +115,27 @@ def train_label_attention(
         avg_loss = total_loss / len(loader)
         print(f"Epoch {epoch}/{epochs}  Loss={avg_loss:.4f}")
 
-        # --- early stopping ---
+        if log_to_wandb:
+            import wandb
+            wandb.log({"la/train_loss": avg_loss, "la/epoch": epoch})
+
+        # early stopping
         if avg_loss < best_loss - 1e-4:
             best_loss = avg_loss
             patience_counter = 0
             torch.save(model.state_dict(), save_path)
             print(f"  [*] New best loss. Model saved to {save_path}")
+            if log_to_wandb:
+                wandb.log({"la/best_loss": best_loss, "la/epoch": epoch})
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print("  [!] Early stopping triggered.")
+                if log_to_wandb:
+                    wandb.log({"la/early_stop_epoch": epoch})
                 break
 
-    # load the best model before returning
+    # load best model
     if os.path.exists(save_path):
         model.load_state_dict(torch.load(save_path, map_location=device))
     return model

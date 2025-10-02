@@ -65,6 +65,18 @@ class Reranker:
             self.attn_model.eval()
 
     def _load_kg(self, kg_dir: Path) -> Dict[str, Any]:
+        """
+        Loads Knowledge Graph (KG) node embeddings from the given directory.
+
+        Specifically, it loads:
+        - node2id.json (mapping node names to indices)
+        - node embeddings (best checkpoint if available; otherwise, latest epoch)
+
+        Returns a dictionary with the following keys:
+        - "node2id": mapping node names to indices
+        - "id2node": mapping indices back to node names
+        - "node_emb": node embeddings (numpy array, shape (N, D))
+        """
         node2id_path = kg_dir / "node2id.json"
         if not node2id_path.exists():
             raise FileNotFoundError(f"KG node2id.json not found at {node2id_path}")
@@ -126,6 +138,13 @@ class Reranker:
         return ((arr - lo) / (hi - lo)).tolist()
 
     def get_record_label_set(self, rec_id: str) -> Set[str]:
+        """
+        Returns the set of labels for the given record ID.
+
+        If the record ID is not found in the labels dataframe, returns an empty set.
+
+        Otherwise, returns a set of labels for which the value in the dataframe is 1.
+        """
         if str(rec_id) not in self.labels_df.index:
             return set()
         row = self.labels_df.loc[str(rec_id)]
@@ -133,10 +152,11 @@ class Reranker:
 
     def get_record_kg_vec(self, rec_id: str) -> np.ndarray:
         """
-        Try in order:
-          1) node key "report:<id>"
-          2) raw id as key
-          3) average label node embeddings (fallback)
+        Returns a Knowledge Graph (KG) node embedding vector for the given record ID.
+        
+        First, it tries to look up the record ID in the node2id mapping.
+        If not found, it falls back to looking up the lower-cased record ID.
+        If still not found, it uses label attention pooling to get a weighted average of label node embeddings.
         """
         node2id = self.kg["node2id"]; node_emb = self.kg["node_emb"]
         k1 = f"report:{rec_id}"
@@ -196,18 +216,24 @@ class Reranker:
         candidate_embs: Optional[np.ndarray] = None,
         candidate_emb_lookup: Optional[Dict[str, np.ndarray]] = None,
         topk: Optional[int] = None,
-        query_emb: Optional[np.ndarray] = None,   # <-- new optional arg
+        query_emb: Optional[np.ndarray] = None, 
     ) -> List[Tuple[str, float, float, float, float]]:
         """
-        Return list of tuples: (candidate_id, final_score, emb_score, lab_score, kg_score)
+        Rerank a list of candidate records based on their embeddings, labels, and KG vectors.
 
-        - candidate_embs: np.array shape (N, D) in same order as candidate_ids (fast)
-        - OR candidate_emb_lookup: dict id->embedding (may also include the query embedding keyed by query_id)
-        - OR pass query_emb explicitly via `query_emb` argument.
-        - If none provided for candidates, raises.
+        Args:
+            query_id (str): ID of the query record
+            candidate_ids (List[str]): IDs of the candidate records
+            candidate_embs (Optional[np.ndarray]): embeddings of the candidate records
+            candidate_emb_lookup (Optional[Dict[str, np.ndarray]]): lookup table for candidate embeddings
+            topk (Optional[int]): number of top records to return
+            query_emb (Optional[np.ndarray]): embedding of the query record
+
+        Returns:
+            List[Tuple[str, float, float, float, float]]: a list of tuples containing the ID of the record, the final reranking score, the cosine similarity score, the Jaccard similarity score, and the KG similarity score.
         """
         N = len(candidate_ids)
-        # 1) get candidate embeddings (build from lookup if needed)
+        # get candidate embeddings (build from lookup if needed)
         if candidate_embs is None:
             if candidate_emb_lookup is not None:
                 candidate_embs = np.vstack([candidate_emb_lookup.get(str(cid), 
@@ -220,7 +246,7 @@ class Reranker:
         if candidate_embs.shape[0] != N:
             raise ValueError("candidate_embs rows must match candidate_ids length")
 
-        # 2) embedding (cosine) scores
+        # embedding (cosine) scores
         # Resolve query embedding (multiple fallbacks)
         q_emb = None
         if candidate_emb_lookup is not None and str(query_id) in candidate_emb_lookup:
@@ -243,13 +269,13 @@ class Reranker:
 
         emb_scores = [self.safe_cos(q_emb, candidate_embs[i]) for i in range(N)]
 
-        # 3) label (Jaccard) scores
+        # label (Jaccard) scores
         q_labels = self.get_record_label_set(query_id)
         lab_scores = []
         for cid in candidate_ids:
             lab_scores.append(self.jaccard_sets(q_labels, self.get_record_label_set(cid)))
 
-        # 4) KG scores
+        # KG scores
         kg_scores = []
         if self.record_kg_vectors is not None and self.record_kg_id2idx is not None:
             q_idx = self.record_kg_id2idx.get(str(query_id), None)
@@ -264,7 +290,7 @@ class Reranker:
                 c_kg = self.get_record_kg_vec(str(cid))
                 kg_scores.append(self.safe_cos(q_kg, c_kg))
 
-        # 5) normalize and combine
+        # normalize and combine
         emb_n = np.array(self.minmax_scale_list(emb_scores))
         lab_n = np.array(self.minmax_scale_list(lab_scores))
         kg_n  = np.array(self.minmax_scale_list(kg_scores))

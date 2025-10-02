@@ -11,6 +11,7 @@ import torch
 import numpy as np
 import pandas as pd
 import random
+import datetime
 import torch.nn as nn
 from tqdm import tqdm
 from sklearn.metrics import average_precision_score, f1_score, precision_recall_curve, precision_score, recall_score, accuracy_score
@@ -206,6 +207,83 @@ def df_to_records(df):
 
 # --- Main ---
 if __name__ == '__main__':
+        # --- wandb init ---
+    wandb.init(
+        project=project_name,
+        name=run_name,
+        config={
+            # Training
+            "epochs": cfg.epochs,
+            "patience": cfg.patience,
+            "batch_size": cfg.batch_size,
+            "lr": cfg.lr,
+            "seed": cfg.seed,
+
+            # Model
+            "num_fusion_layers": cfg.num_fusion_layers,
+            "use_focal": cfg.use_focal,
+            "use_hybrid": cfg.use_hybrid,
+            "image_backbone": cfg.image_backbone,
+            "fusion_type": cfg.fusion_type,
+            "joint_dim": cfg.joint_dim,
+            "num_heads": cfg.num_heads,
+            "text_dim": cfg.text_dim,
+            "use_shared_ffn": cfg.use_shared_ffn,
+            "use_cls_only": cfg.use_cls_only,
+
+            # Knowledge Graph
+            "kg_model": cfg.kg_model,
+            "kg_method": cfg.kg_method,
+            "kg_emb_dim": cfg.kg_emb_dim,
+            "kg_epochs": cfg.kg_epochs,
+            "kg_mode": cfg.kg_mode,
+            "kg_neg_size": cfg.kg_neg_size,
+            "kg_adv_temp": cfg.kg_adv_temp,
+            "kg_use_amp": cfg.kg_use_amp,
+            "kg_lr": cfg.kg_lr,
+            "kg_num_layers": cfg.kg_num_layers,
+            "kg_dropout": cfg.kg_dropout,
+            "kg_opn": cfg.kg_opn,
+
+            # Loss weights
+            "cls_weight": cfg.cls_weight,
+            "cont_weight": cfg.cont_weight,
+            "kg_weight": cfg.kg_weight,
+            "weight_img_joint": cfg.weight_img_joint,
+            "weight_text_joint": cfg.weight_text_joint,
+            "gamma_focal": cfg.gamma_focal,
+            "focal_ratio": cfg.focal_ratio,
+            "temperature": cfg.temperature,
+
+            # Label-Aware
+            "la_hidden_dim": cfg.la_hidden_dim,
+            "la_batch_size": cfg.la_batch_size,
+            "la_epochs": cfg.la_epochs,
+            "la_lr": cfg.la_lr,
+            "la_patience": cfg.la_patience,
+        }
+    )
+
+    kg_wandb_config = {
+        "project": "multi-modal-kg", 
+        "name": f"kg_{cfg.kg_model}_{cfg.kg_mode}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        "config": {
+            "kg_model": cfg.kg_model,
+            "kg_method": cfg.kg_method,
+            "kg_emb_dim": cfg.kg_emb_dim,
+            "kg_epochs": cfg.kg_epochs,
+            "kg_mode": cfg.kg_mode,
+            "kg_neg_size": cfg.kg_neg_size,
+            "kg_adv_temp": cfg.kg_adv_temp,
+            "kg_use_amp": cfg.kg_use_amp,
+            "kg_lr": cfg.kg_lr,
+            "kg_num_layers": cfg.kg_num_layers,
+            "kg_dropout": cfg.kg_dropout,
+            "kg_opn": cfg.kg_opn,
+            "seed": cfg.seed,
+        },
+    }
+
     # Used groups
     combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
     
@@ -233,8 +311,11 @@ if __name__ == '__main__':
         )
 
         kg_trainer.load_triples(features_path=kg_feats_path)   # assumes triples.csv already built
-        kg_trainer.train(epochs=cfg.kg_epochs, log_to_wandb=True, negative_size=cfg.kg_neg_size, 
-                            advance_temp=cfg.kg_adv_temp, use_amp=cfg.kg_use_amp)
+        kg_trainer.train(epochs=cfg.kg_epochs, patience=cfg.patience,
+                        wandb_config=kg_wandb_config, log_to_wandb=True, 
+                        negative_size=cfg.kg_neg_size, 
+                        advance_temp=cfg.kg_adv_temp, use_amp=cfg.kg_use_amp)
+        
         kg_trainer.save_embeddings()
     else:
         print("Using cached KG embeddings")
@@ -386,14 +467,7 @@ if __name__ == '__main__':
         num_training_steps=total_steps
     )
 
-    # --- wandb init ---
-    wandb.init(project=project_name, name = run_name, config={
-        "epochs": EPOCHS,
-        "lr": LR,
-        "batch_size": BATCH_SIZE,
-        "loss": "focal" if USE_FOCAL else "BCEWithLogits",
-        "fusion": FUSION_TYPE
-    })
+    # Addtional metrics for W&B
     wandb.define_metric("epoch")
     wandb.define_metric("val_precision", step_metric="epoch")
     wandb.define_metric("val_recall",    step_metric="epoch")

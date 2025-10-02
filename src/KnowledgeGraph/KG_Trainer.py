@@ -446,7 +446,28 @@ class KGTrainer:
             seed: Optional[int] = None,
             progress_bar_for_eval: bool = True
             ):
-        
+        """
+        Train the Knowledge Graph model using the provided triples.
+
+        Args:
+            epochs (int, optional): Number of epochs to train for. Defaults to 5.
+            batch_size (int, optional): Batch size to use during training. Defaults to 1024.
+            normalize (bool, optional): Whether to normalize the embeddings after training. Defaults to True.
+            save_every (int, optional): Number of epochs between saving the model's embeddings. Defaults to 1.
+            wandb_config (dict, optional): Configuration for Weights and Biases (WandB) logging. Defaults to None.
+            log_to_wandb (bool, optional): Whether to log training metrics to WandB. Defaults to True.
+            patience (int, optional): Number of epochs to wait before early stopping. Defaults to None.
+            metric (str, optional): Metric to use for early stopping. Defaults to "mrr".
+            loss_type (str, optional): Type of loss function to use. Defaults to "logsigmoid".
+            negative_size (int, optional): Number of negative samples to use for each positive sample. Defaults to 32.
+            advance_temp (float, optional): Temperature to use for adversarial weighting. Defaults to 1.0.
+            use_amp (bool, optional): Whether to use automatic mixed precision training. Defaults to None.
+            seed (int, optional): Seed to use for reproducibility. Defaults to None.
+            progress_bar_for_eval (bool, optional): Whether to display a progress bar during evaluation. Defaults to True.
+
+        Returns:
+            int: Number of epochs trained for.
+        """
         if self.model is None:
             raise RuntimeError("Call load_triples() first.")
         self.model.train()
