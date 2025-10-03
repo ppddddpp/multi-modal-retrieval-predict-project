@@ -8,6 +8,7 @@ from .helper import contrastive_loss
 from .model_utils import load_hf_model_or_local
 from .swinDownload import download_swin
 from .webTestSetContruct import create_test_set_for_web
+from .retrieval_metrics import precision_at_k, recall_at_k, mean_average_precision, mean_reciprocal_rank
 
 __all__ = [
     "Config",
@@ -32,5 +33,9 @@ __all__ = [
     "_sanitize_node",
     "safe_roc_auc",
     "safe_avg_precision",
-    "contrastive_loss"
+    "contrastive_loss",
+    "precision_at_k",
+    "recall_at_k",
+    "mean_average_precision",
+    "mean_reciprocal_rank"
 ]

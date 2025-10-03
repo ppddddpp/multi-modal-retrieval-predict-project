@@ -1,13 +1,22 @@
+from pathlib import Path
+import sys
+try:
+    base = Path(__file__).resolve().parent.parent
+except NameError:
+    base = Path.cwd().parent
+sys.path.append(str(base))
 import json
 import pandas as pd
-from pathlib import Path
+from datetime import datetime
+from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 
 BASE_DIR     = Path(__file__).resolve().parent.parent.parent
 SPLIT_DIR    = BASE_DIR / "splited_data"
 GT_DIR       = BASE_DIR / "ground_truths"
 GT_DIR.mkdir(exist_ok=True)
 
-def create_gt(split_dir=None, gt_save_dir=None, combined_groups=True):
+def create_gt(split_dir=None, gt_save_dir=None, 
+                log_file="gt_construct_log.txt" ,combined_groups=None):
     """
     Creates a ground truth file for generalization and historical relevance.
     Ground truth files are saved in the GT_DIR directory by default.
@@ -18,8 +27,10 @@ def create_gt(split_dir=None, gt_save_dir=None, combined_groups=True):
         Path to the directory containing the split IDs JSON files
     gt_save_dir : str
         Path to the directory where the ground truth files will be saved
-    combined_groups : bool
-        If True, ensure the label columns are consistent with disease and normal groups
+    log_file : str
+        Path to the log file
+    combined_groups : dict
+        Dictionary where keys are disease/normal group names and values are lists of labels
 
     Returns
     -------
@@ -27,6 +38,11 @@ def create_gt(split_dir=None, gt_save_dir=None, combined_groups=True):
 
     Saves two JSON files: test_relevance.json and test_to_train_relevance.json
     """
+    if combined_groups is not None:
+        print("Using provided combined_groups")
+    else:
+        combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
+
     if split_dir is None:
         split_dir = SPLIT_DIR
     
@@ -65,9 +81,13 @@ def create_gt(split_dir=None, gt_save_dir=None, combined_groups=True):
         test_to_train[qid] = rel_ids
 
     rel_counts = [len(v) for v in test_relevance.values()]
-    print("Min relevant items per query:", min(rel_counts))
-    print("Max relevant items per query:", max(rel_counts))
-    print("Avg relevant items per query:", sum(rel_counts)/len(rel_counts))
+    min_rel = min(rel_counts)
+    max_rel = max(rel_counts)
+    avg_rel = sum(rel_counts) / len(rel_counts)
+
+    print("Min relevant items per query:", min_rel)
+    print("Max relevant items per query:", max_rel)
+    print("Avg relevant items per query:", avg_rel)
 
     if gt_save_dir is None:
         gt_save_dir = GT_DIR
@@ -78,5 +98,23 @@ def create_gt(split_dir=None, gt_save_dir=None, combined_groups=True):
     with open(gt_save_dir / "test_to_train_relevance.json", "w") as f:
         json.dump(test_to_train, f, indent=2)
 
-    print(f"Saved generalization GT -> {gt_save_dir/'test_relevance.json'}")
-    print(f"Saved historical  GT -> {gt_save_dir/'test_to_train_relevance.json'}")
+    msg_general = f"Saved generalization GT -> {gt_save_dir/'test_relevance.json'}"
+    msg_hist    = f"Saved historical  GT -> {gt_save_dir/'test_to_train_relevance.json'}"
+
+    print(msg_general)
+    print(msg_hist)
+
+    # --- Save log ---
+    log_path = gt_save_dir / log_file
+    with open(log_path, "a") as f:
+        f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]\n")
+        f.write(f"Min relevant items per query: {min_rel}\n")
+        f.write(f"Max relevant items per query: {max_rel}\n")
+        f.write(f"Avg relevant items per query: {avg_rel:.2f}\n")
+        f.write(msg_general + "\n")
+        f.write(msg_hist + "\n\n")
+
+    print(f"Logged summary to {log_path}")
+
+if __name__ == "__main__":
+    create_gt()

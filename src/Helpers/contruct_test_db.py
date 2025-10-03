@@ -1,8 +1,15 @@
+from pathlib import Path
+import sys
+try:
+    base = Path(__file__).resolve().parent.parent
+except NameError:
+    base = Path.cwd().parent
+sys.path.append(str(base))
 import numpy as np, json, torch
 import pandas as pd
-from pathlib import Path
-from .config import Config
+from Helpers.config import Config
 from DataHandler import build_dataloader, parse_openi_xml
+from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 
 BASE_DIR    = Path(__file__).resolve().parent.parent.parent
 CONFIG_PATH = BASE_DIR / "configs" / "config.yaml"
@@ -15,6 +22,9 @@ DICOM_ROOT  = BASE_DIR / "data" / "openi" / "dicom"
 EMBED_DIR.mkdir(exist_ok=True)
 
 def get_model(cfg, ckpt_path, model_dir, device, label_cols):
+    if cfg is None:
+        cfg = Config.load(CONFIG_PATH)
+    
     from Model import MultiModalRetrievalModel
     model = MultiModalRetrievalModel(
         joint_dim=cfg.joint_dim,
@@ -33,57 +43,44 @@ def get_model(cfg, ckpt_path, model_dir, device, label_cols):
 
     return model
 
-def construct_db_test(config_path=None, ckpt_path=None, 
-                        split_dir=None, model_dir=None, 
-                        xml_dir=None, dicom_root=None, 
-                        embed_dir=None,
+def construct_db_test(config_path=CONFIG_PATH, ckpt_path=CKPT_PATH, 
+                        split_dir=SPLIT_DIR, model_dir=MODEL_DIR, 
+                        xml_dir=XML_DIR, dicom_root=DICOM_ROOT, 
+                        embed_dir=EMBED_DIR,
                         combined_groups=None):
     """
-    Constructs a test database for the web application by sampling N records from the test split IDs.
+    Construct a test database for the web application.
 
     Parameters
     ----------
     config_path : str
-        Path to config file
+        Path to the configuration file.
     ckpt_path : str
-        Path to model checkpoint
+        Path to the model checkpoint.
     split_dir : str
-        Path to folder containing train, validation, and test split IDs
+        Path to the folder containing train, validation, and test split IDs.
     model_dir : str
-        Path to folder containing model weights
+        Path to the folder containing the model.
     xml_dir : str
-        Path to folder containing individual .xml report files
+        Path to the folder containing individual .xml report files.
     dicom_root : str
-        Root folder where .dcm files live (possibly nested)
+        Root folder where .dcm files live (possibly nested).
     embed_dir : str
-        Path to save the test embeddings to
+        Path to the folder containing test embeddings and IDs.
     combined_groups : dict of str to list of str
-        Dictionary where keys are disease/normal group names and values are lists of labels
+        Dictionary where keys are disease/normal group names and values are lists of labels.
 
     Returns
     -------
     None
 
-    Saves a JSON file with the following format: {<rid>: {<dicom_path>, <report_text>, <labels>}} to the output directory
+    Saves test embeddings to 'embed_dir/test_joint_embeddings.npy' and test IDs to 'embed_dir/test_ids.json'.
     """
-    # Resolve paths
-    if config_path is None:
-        config_path = CONFIG_PATH
-    if ckpt_path is None:
-        ckpt_path = CKPT_PATH
-    if split_dir is None:
-        split_dir = SPLIT_DIR
-    if xml_dir is None:
-        xml_dir = XML_DIR
-    if dicom_root is None:
-        dicom_root = DICOM_ROOT
-    if model_dir is None:
-        model_dir = MODEL_DIR
-    if embed_dir is None:
-        embed_dir = EMBED_DIR
     if combined_groups is not None:
-        raise ValueError("Please provide a least a list of disease groups and normal groups to label the report with.")
-    
+        print("Using provided combined_groups")
+    else:
+        combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
+
     cfg    = Config.load(config_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     label_cols = list(combined_groups.keys())
@@ -128,19 +125,23 @@ def construct_db_test(config_path=None, ckpt_path=None,
             img  = batch["image"].to(device)
             ids  = batch["input_ids"].to(device)
             mask = batch["attn_mask"].to(device)
-            meta_id = batch["id"][0]
 
-            joint_emb, _, _ = model(img, ids, mask, return_attention=False)
-            all_embs.append(joint_emb.cpu().numpy().squeeze(0))
-            all_ids.append(meta_id)
+            out = model(img, ids, mask, return_attention=False)
+            joint_emb = out["joint_emb"]          # shape: (B, D)
+            logits    = out["logits"]             # shape: (B, num_classes)
+            attn      = out["attn"]
 
-    all_embs = np.vstack(all_embs)
+            # Convert to numpy and store all embeddings in this batch
+            all_embs.append(joint_emb.cpu().numpy())  
+            all_ids.extend(batch["id"])           # extend works for list of IDs
+
+    all_embs = np.vstack(all_embs)   # shape: (N, D)
     np.save(embed_dir / "test_joint_embeddings.npy", all_embs)
 
     with open(embed_dir / "test_ids.json", "w") as f:
         json.dump(all_ids, f)
 
-    print(f"Saved test embeddings to {embed_dir/'test_embeddings.npy'}")
+    print(f"Saved test embeddings to {embed_dir/'test_joint_embeddings.npy'}")
     print(f"Saved test IDs to {embed_dir/'test_ids.json'}")
 
 if __name__ == "__main__":

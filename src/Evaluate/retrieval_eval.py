@@ -1,7 +1,13 @@
+from pathlib import Path
+import sys
+try:
+    base = Path(__file__).resolve().parent.parent
+except NameError:
+    base = Path.cwd().parent
+sys.path.append(str(base))
 import json
 import numpy as np
 import torch
-from pathlib import Path
 import pandas as pd
 import time
 from typing import List
@@ -9,8 +15,9 @@ from Helpers import Config
 from Model import MultiModalRetrievalModel
 from Retrieval import make_retrieval_engine
 from DataHandler import parse_openi_xml, build_dataloader
-from retrieval_metrics import precision_at_k, mean_average_precision, mean_reciprocal_rank
-from LabelData import disease_groups, normal_groups
+from Helpers.retrieval_metrics import precision_at_k, mean_average_precision, mean_reciprocal_rank
+from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
+
 
 BASE_DIR    = Path(__file__).resolve().parent.parent.parent
 CONFIG_PATH = BASE_DIR / "configs" / "config.yaml"
@@ -22,11 +29,15 @@ MODEL_DIR   = BASE_DIR / "models"
 XML_DIR     = BASE_DIR / "data" / "openi" / "xml" / "NLMCXR_reports" / "ecgen-radiology"
 DICOM_ROOT  = BASE_DIR / "data" / "openi" / "dicom"
 
+def retrieval_eval(k=10, combined_groups=None):
+    if combined_groups is not None:
+        print("Using provided combined_groups")
+    else:
+        combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
 
-def main(k=10):
     cfg = Config.load(CONFIG_PATH)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    label_cols = list(disease_groups.keys()) + list(normal_groups.keys())
+    label_cols = list(combined_groups.keys())
 
     with open(GT_DIR / "test_relevance.json") as f:
         gt_general = json.load(f)
@@ -73,7 +84,7 @@ def main(k=10):
         test_ids = json.load(f)
     df_test = df_test[df_test["id"].isin(test_ids)].reset_index(drop=True)
 
-    parsed_records = parse_openi_xml(XML_DIR, DICOM_ROOT)
+    parsed_records = parse_openi_xml(XML_DIR, DICOM_ROOT,combined_groups=combined_groups)
     labels_df = pd.read_csv(BASE_DIR / "outputs" / "openi_labels_final.csv").set_index("id")
 
     records = []
@@ -112,10 +123,7 @@ def main(k=10):
 
         with torch.no_grad():
             outputs = model(img, ids, mask, return_attention=False)
-            if isinstance(outputs, tuple) or isinstance(outputs, list):
-                joint_emb = outputs[0]
-            else:
-                joint_emb = outputs
+            joint_emb = outputs["joint_emb"]
 
         q_emb = joint_emb.cpu().numpy()
 
@@ -165,4 +173,4 @@ def main(k=10):
     print(f"[INFO] Results saved to: {result_path}")
 
 if __name__ == "__main__":
-    main(k=5)
+    retrieval_eval(k=5)
