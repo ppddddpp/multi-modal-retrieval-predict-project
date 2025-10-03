@@ -20,7 +20,7 @@ use_cls_only: false
 # Knowledge graph parameters
 kg_model: "CompGCN"       # options: TransE | TransH | RotatE | CompGCN
 kg_method: "cosine"
-kg_emb_dim: 200
+kg_emb_dim: 300
 kg_epochs: 50
 kg_mode: "hybrid"   # options: dataset | ontology | hybrid
 kg_neg_size: 32
@@ -36,7 +36,7 @@ kg_opn: "corr"           # options: sub | mult | corr
 # Loss parameters
 cls_weight: 3.5
 cont_weight: 0.2
-kg_weight: 0.5
+kg_weight: 0.25
 weight_img_joint : 0.5
 weight_text_joint : 0.5
 gamma_focal: 1

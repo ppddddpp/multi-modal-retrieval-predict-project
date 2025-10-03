@@ -1,6 +1,7 @@
 import io
 import torch
 import pydicom
+from PIL import Image
 import numpy as np
 from torchvision import transforms
 from pathlib import Path
@@ -19,7 +20,7 @@ class DICOMImagePreprocessor:
         self.default_width = default_window_width
         # Define torchvision pipeline
         ops = [
-            transforms.ToPILImage(),
+            # transforms.ToPILImage(),       # For one channel uncomment this
             transforms.Resize(output_size)
         ]
         if augment:
@@ -29,7 +30,7 @@ class DICOMImagePreprocessor:
             ]
         ops += [
             transforms.ToTensor(),
-            transforms.Normalize([mean], [std])
+            transforms.Normalize([mean, mean, mean], [std, std, std])
         ]
         self.transform = transforms.Compose(ops)
 
@@ -127,11 +128,24 @@ class DICOMImagePreprocessor:
             ww = self.default_width
         pixel_array = dcm.pixel_array.astype(np.float32)
         windowed = self.window_image(pixel_array, wc, ww)
+
         # expand channels
+        """
+        # Convert to 1 channel
         img = np.expand_dims(windowed, axis=0)  # (1, H, W)
         tensor = torch.from_numpy(img)
+
         # apply torchvision transforms
         return self.transform(tensor)
+        """
+
+        # Convert to 3 channels
+        img_3c = np.stack([windowed, windowed, windowed], axis=-1)  # (H, W, 3)
+        pil = Image.fromarray((img_3c * 255).astype(np.uint8))
+        
+        # apply torchvision transforms
+        tensor = self.transform(pil) 
+        return tensor
 
     def __call__(self, dicom_path):
         return self.load(dicom_path)

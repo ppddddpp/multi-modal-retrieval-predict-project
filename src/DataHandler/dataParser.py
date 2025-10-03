@@ -3,6 +3,7 @@ import os
 import glob
 import xml.etree.ElementTree as ET
 import spacy
+from tqdm import tqdm 
 from spacy.matcher import PhraseMatcher
 from pathlib import Path
 import subprocess
@@ -119,7 +120,7 @@ def parse_openi_xml(xml_dir=None, dicom_root=None, combined_groups=None):
 
     records = []
 
-    for fname in os.listdir(xml_dir):
+    for fname in tqdm(os.listdir(xml_dir), desc="Parse data"):
         if not fname.endswith('.xml'):
             continue
 

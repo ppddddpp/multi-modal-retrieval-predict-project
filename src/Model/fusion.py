@@ -74,9 +74,10 @@ class Backbones(nn.Module):
         """
         super().__init__()
         self.img_backbone = img_backbone
+        self.swin_channel = 3
 
         if img_backbone == "swin":
-            self.vision = timm.create_model(swin_model_name, pretrained=False, in_chans=1)
+            self.vision = timm.create_model(swin_model_name, pretrained=False, in_chans=self.swin_channel)
             if pretrained and swin_checkpoint_path:
                 try:
                     state = load_safetensor(str(swin_checkpoint_path), device="cpu")
@@ -90,12 +91,12 @@ class Backbones(nn.Module):
                 except Exception as e:
                     print("[WARN] Failed to load Swin checkpoint:", e)
                     print("[INFO] Attempting to download pretrained Swin weights...")
-                    download_swin(swin_name=swin_model_name, swin_ckpt_path=swin_checkpoint_path)
+                    download_swin(swin_name=swin_model_name, swin_ckpt_path=swin_checkpoint_path, swin_channels=self.swin_channel)
                     state = load_safetensor(str(swin_checkpoint_path), device="cpu")
                     filtered = {k: v for k, v in state.items() if k in self.vision.state_dict()}
                     self.vision.load_state_dict(filtered, strict=False)
             elif pretrained:
-                self.vision = timm.create_model(swin_model_name, pretrained=True, in_chans=1)
+                self.vision = timm.create_model(swin_model_name, pretrained=True, in_chans=self.swin_channel)
             self.img_dim = self.vision.num_features if img_dim is None else img_dim
 
         elif img_backbone == "cnn":
