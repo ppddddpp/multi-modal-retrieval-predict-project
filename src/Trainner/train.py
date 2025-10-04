@@ -422,7 +422,7 @@ if __name__ == '__main__':
     label_counts = np.array([r['labels'] for r in train_records]).sum(axis=0)
     num_samples  = len(train_records)   
     pos_weight = ((num_samples - torch.tensor(label_counts)) / torch.tensor(label_counts)).to(device)
-    pos_weight = torch.clamp(pos_weight, min=1.0)  # Ensure no zero weights
+    pos_weight = torch.clamp(pos_weight, min=1.0, max=5.0)  # Ensure no zero weights
     pos_weight = pos_weight.cuda()
 
     # Inverse frequency for Focal Loss

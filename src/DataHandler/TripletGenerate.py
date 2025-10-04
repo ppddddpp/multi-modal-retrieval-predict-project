@@ -1,7 +1,24 @@
 import random
 import torch
+import pandas as pd
 from tqdm import tqdm
 from torch.utils.data import Dataset
+
+
+def _aggregate_labels(row, rid=None):
+    """
+    Given a row from labels_df.loc[rid], return a boolean mask
+    indicating which label columns are active.
+    Handles both Series (single row) and DataFrame (duplicate rows).
+    """
+    if isinstance(row, pd.DataFrame):
+        if rid is not None:
+            print(f"[Warning] Duplicate entries found for ID {rid}, aggregating labels.")
+        # OR across all rows → col is active if any row has 1
+        return (row.fillna(0).astype(int).sum(axis=0) > 0)
+    else:  # Series
+        return (row.fillna(0) == 1)
+
 
 class PseudoTripletDataset(Dataset):
     """
@@ -25,8 +42,13 @@ class PseudoTripletDataset(Dataset):
         self.triplets = self._build_triplets()
 
     def _get_labels(self, rid):
+        """
+        Return a set of label names present for report id `rid`.
+        Handles duplicate rows by aggregating with OR.
+        """
         row = self.labels_df.loc[rid]
-        return set(row.index[row == 1])
+        mask = _aggregate_labels(row, rid)
+        return set(row.columns[mask]) if isinstance(row, pd.DataFrame) else set(row.index[mask])
 
     def _build_triplets(self):
         triplets = []
@@ -70,6 +92,7 @@ class PseudoTripletDataset(Dataset):
         """
         return self.triplets
 
+
 class LabelEmbeddingLookup:
     """
     Given a labels_df and a label_embedding_dict,
@@ -83,9 +106,17 @@ class LabelEmbeddingLookup:
     def get_label_embs(self, report_id):
         """
         Returns tensor [n_labels, d] of label embeddings for this report.
+        Handles duplicate rows by aggregating with OR.
         If report has no known labels, returns zeros [1,d].
         """
-        labels = set(self.labels_df.loc[report_id].index[self.labels_df.loc[report_id] == 1])
+        row = self.labels_df.loc[report_id]
+        mask = _aggregate_labels(row, report_id)
+
+        if isinstance(row, pd.DataFrame):
+            labels = [col for col, present in mask.items() if present]
+        else:  # Series
+            labels = [lbl for lbl, present in zip(row.index, mask) if present]
+
         vecs = []
         for lab in labels:
             if lab in self.label_emb_dict:
@@ -93,7 +124,9 @@ class LabelEmbeddingLookup:
                 if not torch.is_tensor(v):
                     v = torch.tensor(v, dtype=torch.float32)
                 vecs.append(v)
+
         if not vecs:
             d = next(iter(self.label_emb_dict.values())).shape[0]
             return torch.zeros((1, d), dtype=torch.float32, device=self.device)
+
         return torch.stack(vecs).to(self.device)

@@ -26,7 +26,7 @@ kg_mode: "hybrid"   # options: dataset | ontology | hybrid
 kg_neg_size: 32
 kg_adv_temp: 0.5
 kg_use_amp: true
-kg_lr : 1e-3
+kg_lr : 5e-4
 
 # CompGCN-specific (only used if kg_model=CompGCN)
 kg_num_layers: 2
@@ -35,8 +35,8 @@ kg_opn: "corr"           # options: sub | mult | corr
 
 # Loss parameters
 cls_weight: 3.5
-cont_weight: 0.2
-kg_weight: 0.25
+cont_weight: 0.35
+kg_weight: 0.5
 weight_img_joint : 0.5
 weight_text_joint : 0.5
 gamma_focal: 1
@@ -46,9 +46,9 @@ temperature: 0.125
 # Label aware parameters
 la_hidden_dim: 256
 la_batch_size: 128
-la_epochs: 30
+la_epochs: 50
 la_lr: 5e-4
-la_patience: 5
+la_patience: 10
 
 # Wandb parameters
 project_name: "multimodal-disease-classification-2609-experiments"
