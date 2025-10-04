@@ -115,31 +115,32 @@ def retrieval_eval(k=10, combined_groups=None):
     hist_times: List[float] = []
 
     for batch in test_loader:
-        qid = batch["id"][0]
-
         img   = batch["image"].to(device)
         ids   = batch["input_ids"].to(device)
         mask  = batch["attn_mask"].to(device)
+        qids  = batch["id"]   # list of ids in this batch
 
         with torch.no_grad():
             outputs = model(img, ids, mask, return_attention=False)
-            joint_emb = outputs["joint_emb"]
+            joint_embs = outputs["joint_emb"]   # shape (B, 1024)
 
-        q_emb = joint_emb.cpu().numpy()
+        # process each query in the batch separately
+        for i, qid in enumerate(qids):
+            q_vec = joint_embs[i].cpu().numpy()   # shape (1024,)
 
-        # Generalization: test to test
-        t0 = time.perf_counter()
-        ret_ids, _ = engine_testdb.retrieve(q_emb, K=5)
-        gen_times.append(time.perf_counter() - t0)
-        all_ret_gen.append(ret_ids)
-        all_rel_gen.append(gt_general[qid])
+            # --- Generalization: test to test ---
+            t0 = time.perf_counter()
+            ret_ids, _ = engine_testdb.retrieve(q_vec, K=5)
+            gen_times.append(time.perf_counter() - t0)
+            all_ret_gen.append(ret_ids)
+            all_rel_gen.append(gt_general[qid])
 
-        # Historical: test to train
-        t0 = time.perf_counter()
-        ret_ids, _ = engine_traindb.retrieve(q_emb, K=5)
-        hist_times.append(time.perf_counter() - t0)
-        all_ret_hist.append(ret_ids)
-        all_rel_hist.append(gt_historical[qid])
+            # --- Historical: test to train ---
+            t0 = time.perf_counter()
+            ret_ids, _ = engine_traindb.retrieve(q_vec, K=5)
+            hist_times.append(time.perf_counter() - t0)
+            all_ret_hist.append(ret_ids)
+            all_rel_hist.append(gt_historical[qid])
 
     # Evaluate precision at k
     p_gen   = np.mean([precision_at_k(r, rel, k=k) for r, rel in zip(all_ret_gen, all_rel_gen)])
