@@ -422,7 +422,7 @@ if __name__ == '__main__':
     label_counts = np.array([r['labels'] for r in train_records]).sum(axis=0)
     num_samples  = len(train_records)   
     pos_weight = ((num_samples - torch.tensor(label_counts)) / torch.tensor(label_counts)).to(device)
-    pos_weight = torch.clamp(pos_weight, min=1.0, max=5.0)  # Ensure no zero weights
+    pos_weight = torch.clamp(pos_weight, min=1.0, max=cfg.pos_weight_clamp_max)  # Ensure no zero weights
     pos_weight = pos_weight.cuda()
 
     # Inverse frequency for Focal Loss
@@ -703,45 +703,5 @@ if __name__ == '__main__':
 
     with open(EMBED_SAVE_PATH / "train_ids.json", "w") as f:
         json.dump(train_ids, f)
-
-    """
-    # Train LabelAttention
-    report_ids = [r["id"] for r in train_records]
-    MODEL_LA_DIR = BASE_DIR / "label attention model"
-
-    if not (MODEL_LA_DIR / "label_attention_model.pt").exists():
-        print("Training LabelAttention pooling...")
-        pseudo_dataset_train = PseudoTripletDataset(labels_df.loc[train_ids], min_overlap=0.5)
-        pseudo_dataset_val   = PseudoTripletDataset(labels_df.loc[val_ids],   min_overlap=0.5)
-
-        try:
-            print("Loading label embeddings...")
-            label_emb_dict = ensure_label_embeddings(BASE_DIR)
-            print("Done.")
-        except Exception as e:
-            print("[ERROR] ensure_label_embeddings failed:", e)
-            import traceback; traceback.print_exc()
-            sys.exit(1)
-        
-        label_lookup = LabelEmbeddingLookup(labels_df, label_emb_dict, device="cuda")
-
-        emb_sample = label_lookup.get_label_embs(report_ids[0])
-        d_emb_actual = emb_sample.shape[1]
-
-        # Train
-        model_attn = train_label_attention(
-            pseudo_dataset_train,
-            label_lookup,
-            d_emb=d_emb_actual,
-            hidden=cfg.la_hidden_dim,
-            batch_size=cfg.la_batch_size,
-            epochs=cfg.la_epochs,
-            lr=cfg.la_lr,
-            patience=cfg.la_patience,
-            val_dataset=pseudo_dataset_val
-        )
-    else:
-        print("Using cached LabelAttention model")
-    """
 
     print("Done.")

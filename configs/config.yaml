@@ -39,7 +39,7 @@ cont_weight: 0.35
 kg_weight: 0.5
 weight_img_joint : 0.5
 weight_text_joint : 0.5
-gamma_focal: 1
+gamma_focal: 1.5
 focal_ratio: 0.3
 temperature: 0.125
 
@@ -49,6 +49,9 @@ la_batch_size: 128
 la_epochs: 50
 la_lr: 5e-4
 la_patience: 10
+
+# Sample parameters
+pos_weight_clamp_max: 3.0
 
 # Wandb parameters
 project_name: "multimodal-disease-classification-2609-experiments"

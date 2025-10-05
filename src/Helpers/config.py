@@ -57,6 +57,9 @@ class Config:
     la_lr: float = 5e-4
     la_patience: int = 5
 
+    # Sampler parameters
+    pos_weight_clamp_max: float = 1.0
+
     # Wandb parameters
     project_name: str = "multimodal-disease-classification-2609-experiments"
 

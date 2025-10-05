@@ -9,6 +9,7 @@ import json
 import numpy as np
 import torch
 import pandas as pd
+from tqdm import tqdm
 import time
 from typing import List
 from Helpers import Config
@@ -114,7 +115,7 @@ def retrieval_eval(k=10, combined_groups=None):
     gen_times: List[float]  = []
     hist_times: List[float] = []
 
-    for batch in test_loader:
+    for batch in tqdm(test_loader, desc="Evaluating Retrieval"):
         img   = batch["image"].to(device)
         ids   = batch["input_ids"].to(device)
         mask  = batch["attn_mask"].to(device)

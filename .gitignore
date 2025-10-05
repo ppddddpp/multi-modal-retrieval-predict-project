@@ -211,6 +211,7 @@ finalOutputDataEDA.ipynb
 show_iou_scores.ipynb
 uploadHF.py
 check.py
+config_old.yaml
 
 # Ignore additional files and folders
 cudaCheck.ipynb
