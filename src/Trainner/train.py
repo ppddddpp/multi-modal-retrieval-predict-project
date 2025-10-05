@@ -704,6 +704,7 @@ if __name__ == '__main__':
     with open(EMBED_SAVE_PATH / "train_ids.json", "w") as f:
         json.dump(train_ids, f)
 
+    """
     # Train LabelAttention
     report_ids = [r["id"] for r in train_records]
     MODEL_LA_DIR = BASE_DIR / "label attention model"
@@ -741,5 +742,6 @@ if __name__ == '__main__':
         )
     else:
         print("Using cached LabelAttention model")
+    """
 
     print("Done.")

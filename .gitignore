@@ -195,6 +195,7 @@ check_run
 splited_data
 splited_data_old
 label attention model
+label attention model temp
 retrieval_diversity_score
 
 # Local information

@@ -34,7 +34,7 @@ kg_dropout: 0.25
 kg_opn: "corr"           # options: sub | mult | corr
 
 # Loss parameters
-cls_weight: 3.5
+cls_weight: 5.0
 cont_weight: 0.35
 kg_weight: 0.5
 weight_img_joint : 0.5
