@@ -13,6 +13,21 @@ import torch.nn as nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from KnowledgeGraph.label_attention import LabelAttention
+import json
+import pandas as pd
+from DataHandler import parse_openi_xml
+from DataHandler.TripletGenerate import PseudoTripletDataset, LabelEmbeddingLookup
+from KnowledgeGraph.kg_label_create import ensure_label_embeddings
+from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
+from Helpers import Config
+try:
+    BASE_DIR = Path(__file__).resolve().parent.parent.parent
+except NameError:
+    BASE_DIR = Path.cwd().parent.parent
+XML_DIR = BASE_DIR / 'data' / 'openi' / 'xml' / 'NLMCXR_reports' / 'ecgen-radiology'
+DICOM_ROOT = BASE_DIR / 'data' / 'openi' / 'dicom'
+SPLIT_DIR = BASE_DIR / 'splited_data'
+CONFIG_DIR = BASE_DIR / 'configs'
 
 # Base project dir (3 levels up)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -207,3 +222,72 @@ def train_label_attention(
         checkpoint = torch.load(save_path, map_location=device)
         model.load_state_dict(checkpoint["model_state"])
     return model
+
+
+if __name__ == "__main__":
+    combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
+    cfg = Config.load(CONFIG_DIR / 'config.yaml')
+
+    # --- Load records + split ---
+    print("Loading records...")
+    parsed_records = parse_openi_xml(XML_DIR, DICOM_ROOT, combined_groups=combined_groups)
+    labels_df = pd.read_csv(BASE_DIR / "outputs" / "openi_labels_final.csv").set_index("id")
+    label_cols = list(disease_groups.keys()) + list(normal_groups.keys()) + list(finding_groups.keys()) + list(symptom_groups.keys())
+    
+    records = []
+    for rec in parsed_records:
+        rec_id = rec["id"]
+        if rec_id in labels_df.index:
+            label_vec = labels_df.loc[rec_id, label_cols].tolist()
+            records.append({
+                "id": rec["id"],
+                "report_text": rec["report_text"],
+                "dicom_path": rec["dicom_path"],
+                "labels": label_vec
+            })
+
+    with open(SPLIT_DIR / "train_split_ids.json") as f:
+        train_ids = set(json.load(f))
+
+    with open(SPLIT_DIR / "val_split_ids.json") as f:
+        val_ids = set(json.load(f))
+
+    train_records = [r for r in records if r["id"] in train_ids]
+    val_records   = [r for r in records if r["id"] in val_ids]
+
+    report_ids = [r["id"] for r in train_records]
+    MODEL_LA_DIR = BASE_DIR / "label attention model"
+
+    if not (MODEL_LA_DIR / "label_attention_model.pt").exists():
+        print("Training LabelAttention pooling...")
+        pseudo_dataset_train = PseudoTripletDataset(labels_df.loc[list(train_ids)], min_overlap=0.5)
+        pseudo_dataset_val   = PseudoTripletDataset(labels_df.loc[list(val_ids)],   min_overlap=0.5)
+
+        try:
+            print("Loading label embeddings...")
+            label_emb_dict = ensure_label_embeddings(BASE_DIR)
+            print("Done.")
+        except Exception as e:
+            print("[ERROR] ensure_label_embeddings failed:", e)
+            import traceback; traceback.print_exc()
+            sys.exit(1)
+        
+        label_lookup = LabelEmbeddingLookup(labels_df, label_emb_dict, device="cuda")
+
+        emb_sample = label_lookup.get_label_embs(report_ids[0])
+        d_emb_actual = emb_sample.shape[1]
+
+        # Train
+        model_attn = train_label_attention(
+            pseudo_dataset_train,
+            label_lookup,
+            d_emb=d_emb_actual,
+            hidden=cfg.la_hidden_dim,
+            batch_size=cfg.la_batch_size,
+            epochs=cfg.la_epochs,
+            lr=cfg.la_lr,
+            patience=cfg.la_patience,
+            val_dataset=pseudo_dataset_val
+        )
+    else:
+        print("Using cached LabelAttention model")
