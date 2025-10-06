@@ -444,9 +444,13 @@ class MultiModalRetrievalModel(nn.Module):
                 predictions, top-K values, top-K indices, and explanation maps if
                 explain is True.
         """
-        joint_emb, logits, attn_weights = self.forward(
+        out = self.forward(
             image, input_ids, attention_mask, return_attention=explain
         )
+
+        joint_emb = out["joint_emb"]
+        logits = out["logits"]
+        attn_weights = out.get("attn", None)
 
         # probabilities 
         probs = torch.sigmoid(logits)               # (B, num_classes)
@@ -616,9 +620,10 @@ class MultiModalRetrievalModel(nn.Module):
                 device=self.device
             )
 
-        _, _, attn_weights = self.forward(
+        forward_out = self.forward(
             image, input_ids, attention_mask, return_attention=True
         )
+        attn_weights = forward_out.get("attn", None)
 
         # Extract features for heatmap methods
         (img_global, img_patches), txt_feats = self.backbones(

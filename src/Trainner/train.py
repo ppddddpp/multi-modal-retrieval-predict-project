@@ -21,10 +21,7 @@ from Model import MultiModalRetrievalModel
 from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 from Helpers import kg_alignment_loss, contrastive_loss, Config, safe_roc_auc, safe_avg_precision
-from DataHandler.TripletGenerate import PseudoTripletDataset, LabelEmbeddingLookup
-from train_label_attention import train_label_attention
 from KnowledgeGraph import KGBuilder, KGTrainer
-from KnowledgeGraph.kg_label_create import ensure_label_embeddings
 import wandb
 import pandas as pd
 from dotenv import load_dotenv
@@ -310,11 +307,12 @@ if __name__ == '__main__':
             device="cuda"
         )
 
-        kg_trainer.load_triples(features_path=kg_feats_path)   # assumes triples.csv already built
+        kg_trainer.load_triples(features_path=kg_feats_path)
         kg_trainer.train(epochs=cfg.kg_epochs, patience=cfg.patience,
                         wandb_config=kg_wandb_config, log_to_wandb=True, 
                         negative_size=cfg.kg_neg_size, 
-                        advance_temp=cfg.kg_adv_temp, use_amp=cfg.kg_use_amp)
+                        advance_temp=cfg.kg_adv_temp, use_amp=cfg.kg_use_amp,
+                        seed=cfg.seed)
         
         kg_trainer.save_embeddings()
     else:
@@ -424,6 +422,17 @@ if __name__ == '__main__':
     pos_weight = ((num_samples - torch.tensor(label_counts)) / torch.tensor(label_counts)).to(device)
     pos_weight = torch.clamp(pos_weight, min=1.0, max=cfg.pos_weight_clamp_max)  # Ensure no zero weights
     pos_weight = pos_weight.cuda()
+
+    # --- Pos-weight diagnostics ---
+    pw_np = pos_weight.detach().cpu().numpy()
+    print(f"[INFO] pos_weight stats for {len(train_records)} samples: min: {pw_np.min():.3f}, max: {pw_np.max():.3f}, mean: {pw_np.mean():.3f}, median: {np.median(pw_np):.3f}")
+    wandb.log({
+        "pos_weight/min": float(pw_np.min()),
+        "pos_weight/max": float(pw_np.max()),
+        "pos_weight/mean": float(pw_np.mean()),
+        "pos_weight/median": float(np.median(pw_np)),
+    })
+
 
     # Inverse frequency for Focal Loss
     pos_freq_t = torch.tensor(pos_freq_np, dtype=torch.float32).to(device)
@@ -564,6 +573,28 @@ if __name__ == '__main__':
         y_true, y_pred, val_embs, val_ids, val_attns = evaluate(model, val_loader)
         best_ts = find_best_thresholds(y_true, y_pred)
         y_bin = (y_pred > best_ts[None, :]).astype(int)
+
+        # --- Validation prediction diagnostics ---
+        avg_labels_pred = y_bin.sum(axis=1).mean()
+        per_label_pred_count = y_bin.sum(axis=0)
+        per_label_prec = [precision_score(y_true[:,i], y_bin[:,i], zero_division=0) for i in range(y_true.shape[1])]
+        per_label_rec = [recall_score(y_true[:,i], y_bin[:,i], zero_division=0) for i in range(y_true.shape[1])]
+
+        print(f"[INFO] avg predicted labels/sample: {avg_labels_pred:.3f}")
+        print(f"[INFO] per-label pred count range: min={per_label_pred_count.min()}, max={per_label_pred_count.max()}, median={np.median(per_label_pred_count)}")
+        print(f"[INFO] per-label precision range: min={np.min(per_label_prec):.3f}, median={np.median(per_label_prec):.3f}")
+        print(f"[INFO] per-label recall range: min={np.min(per_label_rec):.3f}, median={np.median(per_label_rec):.3f}")
+
+        wandb.log({
+            "pred/avg_labels_per_sample": float(avg_labels_pred),
+            "pred/pred_count_min": int(per_label_pred_count.min()),
+            "pred/pred_count_max": int(per_label_pred_count.max()),
+            "pred/pred_count_median": float(np.median(per_label_pred_count)),
+            "pred/precision_min": float(np.min(per_label_prec)),
+            "pred/precision_median": float(np.median(per_label_prec)),
+            "pred/recall_min": float(np.min(per_label_rec)),
+            "pred/recall_median": float(np.median(per_label_rec)),
+        })
 
         for i, cn in enumerate(label_cols):
             wandb.log({f"thresh_{cn}": float(best_ts[i]), "epoch": epoch+1})

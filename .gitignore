@@ -216,6 +216,7 @@ config_old.yaml
 # Ignore additional files and folders
 cudaCheck.ipynb
 run.ipynb
+config-old
 wandb
 upload
 embeddings
@@ -225,4 +226,5 @@ eval_csvs
 featureDBs
 ground_truths
 web_test_set
+eval_test_csvs
 retrieval_eval_result
