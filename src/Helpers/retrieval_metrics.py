@@ -70,3 +70,20 @@ def mean_reciprocal_rank(
                 break
         rr_list.append(rr)
     return float(np.mean(rr_list))
+
+def recall_at_k(retrieved, relevant, k=5):
+    if len(relevant) == 0:
+        return 0.0
+    retrieved_topk = retrieved[:k]
+    hits = len(set(retrieved_topk) & set(relevant))
+    return hits / len(set(relevant))
+
+def ndcg_at_k(retrieved, relevant, k=5):
+    def dcg(scores):
+        return sum(score / np.log2(idx + 2) for idx, score in enumerate(scores))
+    retrieved_topk = retrieved[:k]
+    scores = [1 if r in relevant else 0 for r in retrieved_topk]
+    ideal_scores = sorted(scores, reverse=True)
+    dcg_val = dcg(scores)
+    idcg_val = dcg(ideal_scores)
+    return dcg_val / idcg_val if idcg_val > 0 else 0.0

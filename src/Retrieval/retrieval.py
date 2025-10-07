@@ -86,17 +86,37 @@ class DLSRetrievalEngine(RetrievalEngine):
         if self.fdb_path.exists():
             try:
                 with open(self.fdb_path, "rb") as f:
-                    graph = pickle.load(f)
-                if len(graph) == self.embs.shape[0]:
+                    data = pickle.load(f)
+                # backward compatibility: support old plain list format
+                if isinstance(data, dict) and "graph" in data and "dim" in data:
+                    graph = data["graph"]
+                    graph_dim = data["dim"]
+                else:
+                    graph = data
+                    graph_dim = self.embs.shape[1]
+
+                print(f"[INFO] Loaded cached link graph: {self.fdb_path.name}")
+                print(f"[INFO] Cached graph size = {len(graph)} nodes, dim = {graph_dim}")
+                print(f"[INFO] Current embeddings: N={self.embs.shape[0]}, D={self.embs.shape[1]}")
+
+                if len(graph) == self.embs.shape[0] and graph_dim == self.embs.shape[1]:
+                    print("[INFO] Link graph is compatible — using cache.")
                     self.link_graph = graph
                     rebuild = False
-            except Exception:
+                else:
+                    print("[WARN] Cached graph shape mismatch — rebuilding...")
+                    rebuild = True
+            except Exception as e:
+                print(f"[WARN] Failed to load link graph ({e}) — rebuilding...")
                 rebuild = True
 
         if rebuild:
-            self.link_graph = self._build_link_graph(link_threshold, max_links)
+            print(f"[INFO] Rebuilding link graph for {features_path} ...")
+            graph = self._build_link_graph(link_threshold, max_links)
+            print(f"[INFO] Built link graph with {len(graph)} nodes and dim={self.embs.shape[1]}")
+            self.link_graph = graph
             with open(self.fdb_path, "wb") as f:
-                pickle.dump(self.link_graph, f)
+                pickle.dump({"graph": graph, "dim": self.embs.shape[1]}, f)
 
     def _build_link_graph(self, threshold: float, max_links: int) -> List[List[int]]:
         """
@@ -126,7 +146,8 @@ class DLSRetrievalEngine(RetrievalEngine):
         candidate_multiplier: int = 10,
         reranker: Optional["Reranker"] = None,
         query_id: Optional[str] = None,
-        rerank_topk: Optional[int] = None
+        rerank_topk: Optional[int] = None,
+        seed: Optional[int] = None,
     ) -> Tuple[List[str], List[float]]:
         """
         Retrieves top-K IDs and their scores based on a query embedding.
@@ -148,6 +169,7 @@ class DLSRetrievalEngine(RetrievalEngine):
         - reranker: optional Reranker object for reranking (default None)
         - query_id: optional query ID for reranking (default None)
         - rerank_topk: optional number of top candidates to rerank (default None)
+        - seed: optional seed node for the graph walk (default None)
 
         Returns:
         - A list of top-K IDs
@@ -163,6 +185,16 @@ class DLSRetrievalEngine(RetrievalEngine):
             )
 
         # --- Seed selection ---
+        if seed is not None:
+            # Set seed globally for reproducibility
+            np.random.seed(seed)
+        elif query_id is not None:
+            # Use query_id to generate a stable seed (so each query gets consistent seeds)
+            np.random.seed(abs(hash(str(query_id))) % (2**32))
+        else:
+            # fallback to random each call
+            np.random.seed(None)
+
         seeds = np.random.choice(N, size=min(seed_size, N), replace=False).tolist()
         visited = set(seeds)
 

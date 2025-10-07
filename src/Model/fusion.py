@@ -296,6 +296,8 @@ class CrossModalFusion(nn.Module):
             nn.Linear(joint_dim, joint_dim)
         )
 
+        self.embed_dim = joint_dim
+
     def forward(self, img_global, img_patch, txt_feats, return_attention=False):
         """
         Compute the cross-modal fusion of the input image and text features.

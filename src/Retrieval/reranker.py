@@ -5,6 +5,7 @@ from typing import Tuple, List, Optional, Dict, Any, Set
 from pathlib import Path
 import pandas as pd
 from KnowledgeGraph.label_attention import LabelAttention
+from Helpers.config import Config
 
 # Base dirs
 BASE_DIR        = Path(__file__).resolve().parent.parent.parent
@@ -12,6 +13,7 @@ EMBEDDINGS_DIR  = BASE_DIR / "embeddings"
 FEATURES_PATH   = BASE_DIR / "featureDBs"
 KG_DIR_DEFAULT  = BASE_DIR / "knowledge_graph"
 LABELS_CSV_DEF  = BASE_DIR / "outputs" / "openi_labels_final.csv"
+CONFIG_PATH     = BASE_DIR / "configs" / "config.yaml"
 
 class Reranker:
     """
@@ -56,14 +58,33 @@ class Reranker:
                 self.record_kg_vectors = None
                 self.record_kg_id2idx = None
 
-        self.attn_model = None
+        cfg = Config.load(CONFIG_PATH)
         model_path = BASE_DIR / "label attention model" / "label_attention_model.pt"
         if model_path.exists():
-            d_kge = self.kg["node_emb"].shape[1]
-            self.attn_model = LabelAttention(d_emb=d_kge)
-            self.attn_model.load_state_dict(torch.load(model_path, map_location="cpu"))
-            self.attn_model.eval()
+            print(f"[INFO] Loading LabelAttention from {model_path}")
+            ckpt = torch.load(model_path, map_location="cpu")
 
+            # get state dict and saved config
+            if isinstance(ckpt, dict):
+                state_dict = ckpt.get("model_state", ckpt)
+                ckpt_config = ckpt.get("config", {})
+            else:
+                state_dict = ckpt
+                ckpt_config = {}
+
+            # always use saved d_emb/hidden if present
+            d_emb_saved = ckpt_config.get("d_emb", self.kg["node_emb"].shape[1])
+            hidden_dim = ckpt_config.get("hidden", cfg.la_hidden_dim)
+
+            print(f"[INFO] Instantiating LabelAttention(d_emb={d_emb_saved}, hidden={hidden_dim})")
+            self.attn_model = LabelAttention(d_emb=d_emb_saved, hidden=hidden_dim)
+            self.attn_model.load_state_dict(state_dict, strict=True)
+            self.attn_model.eval()
+            print("[INFO] LabelAttention model loaded successfully")
+        else:
+            self.attn_model = None
+            print("[INFO] No LabelAttention model found – will fall back to mean pooling")
+            
     def _load_kg(self, kg_dir: Path) -> Dict[str, Any]:
         """
         Loads Knowledge Graph (KG) node embeddings from the given directory.
@@ -139,7 +160,7 @@ class Reranker:
 
     def get_record_label_set(self, rec_id: str) -> Set[str]:
         """
-        Returns the set of labels for the given record ID.
+        Returns a set of labels for the given record ID.
 
         If the record ID is not found in the labels dataframe, returns an empty set.
 
@@ -148,7 +169,14 @@ class Reranker:
         if str(rec_id) not in self.labels_df.index:
             return set()
         row = self.labels_df.loc[str(rec_id)]
-        return set([c for c, v in row.items() if int(v) == 1])
+        labels = []
+        for c, v in row.items():
+            try:
+                if int(v) == 1:
+                    labels.append(c)
+            except (ValueError, TypeError):
+                continue  # skip non-numeric columns (like text)
+        return set(labels)
 
     def get_record_kg_vec(self, rec_id: str) -> np.ndarray:
         """

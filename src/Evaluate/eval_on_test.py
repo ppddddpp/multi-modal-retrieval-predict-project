@@ -10,8 +10,7 @@ import torch
 import numpy as np
 import pandas as pd
 import json
-import warnings
-from sklearn.metrics import average_precision_score, precision_recall_curve, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import average_precision_score, precision_recall_curve, precision_score, recall_score, f1_score
 
 from Helpers import Config, safe_roc_auc, safe_avg_precision, log_and_print
 from Model import MultiModalRetrievalModel

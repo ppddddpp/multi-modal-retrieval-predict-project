@@ -237,17 +237,20 @@ class ExplanationEngine:
         # -------- MULTIMODAL (default) --------
         # Move to device and ensure patches require grad
         device = getattr(self, "device", img_patches.device)
-        img_patches = img_patches.clone().detach().to(device).requires_grad_(True)  # (B,Np,E)
-        txt_feats   = txt_feats.clone().detach().to(device)
-        img_global  = img_global.clone().detach().to(device)
+
+        img_patches = img_patches.to(device).requires_grad_(True)  # (B,Np,E)
+        txt_feats   = txt_feats.to(device)
+        img_global  = img_global.to(device)
 
         fused_out = self.fusion_model(
-            img_global = img_patches.mean(dim=1),
+            img_global = img_global,
             img_patch  = img_patches,
             txt_feats  = txt_feats,
             return_attention = False
         )
         fused_out = fused_out[0] if isinstance(fused_out, (tuple, list)) else fused_out
+
+        # classifier forward
         logits = self.classifier_head(fused_out)  # (B, num_classes)
 
         # Pick target score scalar: sum across batch to get a single scalar
@@ -262,14 +265,13 @@ class ExplanationEngine:
             inputs=img_patches,
             retain_graph=True,
             create_graph=False,
-            allow_unused=True
         )[0]  # (B, Np, E) or None
 
         if grads is None:
-            raise RuntimeError("Gradients wrt img_patches are None. Ensure forward path depends on img_patches.")
-
+            print("[WARN][GradCAM] grads=None! No connection to img_patches.")
+            
         # Channel-weighted sum analogous to Grad-CAM: elementwise product then sum over embedding dim
-        cam = (grads * img_patches).sum(dim=-1)  # (B, Np)
+        cam = (grads * img_patches).sum(dim=-1) # (B, Np)
 
         # Keep positive contributions only (ReLU)
         cam = torch.relu(cam)  # (B, Np)

@@ -543,9 +543,18 @@ class MultiModalRetrievalModel(nn.Module):
                 - 'gradcam_maps': dict of target to (H, W) Grad-CAM map over image patches
         """
         # Case-based retrieval again as part of explanation
-        q_emb = joint_emb.detach().cpu().numpy()
-        retr_ids, retr_dists = self.retriever.retrieve(q_emb, K=K)
-
+        q_emb_np = joint_emb.detach().cpu().numpy()
+        # --- Batch-safe retrieval ---
+        if q_emb_np.ndim == 2:
+            all_ids, all_dists = [], []
+            for i, single_q in enumerate(q_emb_np):
+                ids, dists = self.retriever.retrieve(single_q, K=K)
+                all_ids.append(ids)
+                all_dists.append(dists)
+            retr_ids, retr_dists = all_ids, all_dists
+        else:
+            retr_ids, retr_dists = self.retriever.retrieve(q_emb_np, K=K)
+        
         # Lazy-init explainer
         if self.explainer is None:
             self.explainer = ExplanationEngine(
@@ -572,83 +581,18 @@ class MultiModalRetrievalModel(nn.Module):
         }
 
         # Get attention maps explained
-        maps = self.explainer.explain(
-            img_global=img_global,
-            img_patches=img_patches,
-            txt_feats=txt_feats,
-            attn_weights=attn_weights_expl,
-            targets=targets
-        )
+        with torch.enable_grad():
+            maps = self.explainer.explain(
+                img_global=img_global,
+                img_patches=img_patches,
+                txt_feats=txt_feats,
+                attn_weights=attn_weights_expl,
+                targets=targets
+            )
 
         return {
             'retrieval_ids':   retr_ids,
             'retrieval_dists': retr_dists,
-            'attention_map':   maps['attention_map'],
-            'ig_maps':         maps['ig_maps'],
-            'gradcam_maps':      maps['gradcam_maps']
-        }
-    
-    def get_explain_score(
-        self,
-        image: torch.Tensor,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        targets: list,
-    ) -> dict:
-        """
-        Computes explanation maps for a single input using three methods.
-
-        Args:
-            image: torch.Tensor of shape (B, C, H, W)
-            input_ids: torch.Tensor of shape (B, T)
-            attention_mask: torch.Tensor of shape (B, T)
-            targets: single int or list of ints for the class indices to explain
-
-        Returns:
-            dict with three keys:
-                - 'attention_map': (H, W) attention map over image patches
-                - 'ig_maps':       dict of target to (H, W) IG map over image patches
-                - 'gradcam_maps':  dict of target to (H, W) Grad-CAM map over image patches
-        """
-        # Lazy-init explainer
-        if self.explainer is None:
-            self.explainer = ExplanationEngine(
-                fusion_model=self.fusion_layers[-1],
-                classifier_head=self.classifier,
-                image_size=self.image_size,
-                ig_steps=self.ig_steps,
-                device=self.device
-            )
-
-        forward_out = self.forward(
-            image, input_ids, attention_mask, return_attention=True
-        )
-        attn_weights = forward_out.get("attn", None)
-
-        # Extract features for heatmap methods
-        (img_global, img_patches), txt_feats = self.backbones(
-            image.to(self.device),
-            input_ids.to(self.device),
-            attention_mask.to(self.device)
-        )
-
-        # Extract attention maps
-        last_idx = len(self.fusion_layers) - 1
-        attn_weights_expl = {
-            "txt2img": attn_weights.get(f"layer_{last_idx}_txt2img"),
-            "img2txt": attn_weights.get(f"layer_{last_idx}_img2txt"),
-            "comb":    attn_weights.get(f"layer_{last_idx}_comb", None)
-        }
-
-        maps = self.explainer.explain(
-            img_global=img_global,
-            img_patches=img_patches,
-            txt_feats=txt_feats,
-            attn_weights=attn_weights_expl,
-            targets=targets
-        )
-
-        return {
             'attention_map':   maps['attention_map'],
             'ig_maps':         maps['ig_maps'],
             'gradcam_maps':      maps['gradcam_maps']
@@ -698,3 +642,87 @@ class MultiModalRetrievalModel(nn.Module):
             "ig_maps": maps["ig_maps"],   # token-level attribution
             "gradcam_maps": maps["gradcam_maps"] # token-level Grad-CAM
         }
+
+    def get_explain_score(self, image: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor,
+        target: int = None, K: int = 5) -> dict:
+        """
+        Convenience wrapper that returns explanation maps and retrieval results for a
+        single example (or a batch). This matches the schema used by app.py.
+
+        ```
+        Parameters
+        ----------
+        image : torch.Tensor
+            (B, C, H, W) or (C, H, W) single image.
+        input_ids : torch.Tensor
+            (B, T) or (T,) token ids.
+        attention_mask : torch.Tensor
+            (B, T) or (T,) attention mask.
+        target : int, optional
+            If provided, the returned ig_maps/gradcam_maps will be filtered to this class index.
+        K : int
+            Number of retrieval neighbours to return.
+
+        Returns
+        -------
+        dict
+            {
+            "attention_map": np.ndarray or None,      # image attention map (H, W) or patch map
+            "ig_maps": { target_idx: np.ndarray, ... },   # dict keyed by int
+            "gradcam_maps": { target_idx: np.ndarray, ... },
+            "retrieval_ids": list or nested list,
+            "retrieval_dists": list or nested list
+            }
+        """
+        # local helper (avoid depending on app.py helpers)
+        def _to_numpy(x):
+            if x is None:
+                return None
+            if torch.is_tensor(x):
+                return x.detach().cpu().numpy()
+            try:
+                return np.asarray(x)
+            except Exception:
+                return x
+
+        # Ensure batch dimension for predict() compatibility
+        added_batch = False
+        if image is not None and image.dim() == 3:
+            image = image.unsqueeze(0)
+            added_batch = True
+
+        if input_ids is not None and input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if attention_mask is not None and attention_mask.dim() == 1:
+            attention_mask = attention_mask.unsqueeze(0)
+
+        # Delegate to existing predict flow which already supports explain=True
+        out = self.predict(image, input_ids, attention_mask, K=K, explain=True)
+
+        # Normalize outputs
+        attention_map = _to_numpy(out.get("attention_map", None))
+        ig_maps = out.get("ig_maps", {}) or {}
+        gradcam_maps = out.get("gradcam_maps", {}) or {}
+
+        # ensure keys are ints and values are numpy
+        ig_maps = {int(k): _to_numpy(v) for k, v in ig_maps.items()}
+        gradcam_maps = {int(k): _to_numpy(v) for k, v in gradcam_maps.items()}
+
+        # If a specific target requested, filter dictionaries to that single key (if present)
+        if target is not None:
+            t = int(target)
+            ig_maps = {t: ig_maps.get(t)} if t in ig_maps else {}
+            gradcam_maps = {t: gradcam_maps.get(t)} if t in gradcam_maps else {}
+
+        # Retrieval outputs (predict/explain returns these already)
+        retrieval_ids = out.get("retrieval_ids", [])
+        retrieval_dists = out.get("retrieval_dists", [])
+
+        return {
+            "attention_map": attention_map,
+            "ig_maps": ig_maps,
+            "gradcam_maps": gradcam_maps,
+            "retrieval_ids": retrieval_ids,
+            "retrieval_dists": retrieval_dists
+        }
+

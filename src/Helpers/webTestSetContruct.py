@@ -1,8 +1,15 @@
+from pathlib import Path
+import sys
+try:
+    base = Path(__file__).resolve().parent.parent
+except NameError:
+    base = Path.cwd().parent
+sys.path.append(str(base))
 import json
 import shutil
 import random
-from pathlib import Path
 from DataHandler import parse_openi_xml
+from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 XML_DIR = BASE_DIR / "data/openi/xml/NLMCXR_reports/ecgen-radiology"
@@ -40,7 +47,7 @@ def create_test_set_for_web(xml_dir=XML_DIR, dicom_dir=DICOM_DIR, split_dir=SPLI
         test_ids = json.load(f)
 
     if combined_groups is None:
-        raise ValueError("Please provide a least a list of disease groups and normal groups to label the report with.")
+        combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
 
     # Parse all records
     records = parse_openi_xml(xml_dir, dicom_dir, combined_groups=combined_groups)

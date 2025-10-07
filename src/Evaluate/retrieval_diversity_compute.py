@@ -1,43 +1,87 @@
-import json
 from pathlib import Path
-from typing import List, Optional, Dict, Any
-import pandas as pd
-import numpy as np
+import sys
+try:
+    base = Path(__file__).resolve().parent.parent
+except NameError:
+    base = Path.cwd().parent
+sys.path.append(str(base))
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 
-def load_json(path: str) -> List[Dict[str,Any]]:
+import warnings
+
+# --- Show each unique warning only once ---
+warnings.filterwarnings("once")
+
+# --- Suppress repetitive / irrelevant library warnings ---
+warnings.filterwarnings(
+    "ignore",
+    message=".*CUDA path could not be detected.*",
+    category=UserWarning,
+    module="cupy"
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*TRANSFORMERS_CACHE.*",
+    category=FutureWarning,
+    module="transformers"
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*clean_up_tokenization_spaces.*",
+    category=FutureWarning,
+    module="transformers"
+)
+# --- NEW: silence spaCy / weasel deprecation spam ---
+warnings.filterwarnings(
+    "ignore",
+    message=".*Importing 'parser.split_arg_string' is deprecated.*",
+    category=DeprecationWarning,
+    module="spacy"
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*Importing 'parser.split_arg_string' is deprecated.*",
+    category=DeprecationWarning,
+    module="weasel"
+)
+
+import json
+from typing import List, Dict, Any
+import numpy as np
+import pandas as pd
+
+# ------------------------
+# Simple JSON loader
+# ------------------------
+def load_json(path: str) -> List[Dict[str, Any]]:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"JSON file not found: {path}")
     with p.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
-        raise ValueError("Expected JSON root to be a list of query objects.")
+        raise ValueError("Expected JSON root to be a list.")
     return data
 
 # ------------------------
-# Query → Retrieval parsing
+# Flatten Q->R for CSV export
 # ------------------------
-def flatten_retrievals(data: List[Dict[str,Any]]) -> pd.DataFrame:
-    """Flatten the JSON into a long DataFrame: one row per retrieval entry (Q to R)."""
+def flatten_retrievals(data: List[Dict[str, Any]]) -> pd.DataFrame:
     rows = []
     for q in data:
         qid = q.get("qid")
         qreport = q.get("query_report")
-        retrievals = q.get("retrieval", []) or []
-        for rank, r in enumerate(retrievals, start=1):
+        # train retrievals
+        for rank, r in enumerate(q.get("retrieval_train", []) or [], start=1):
             base = {
                 "qid": qid,
                 "query_report": qreport,
+                "retrieval_db": "train",
                 "rid": r.get("rid"),
                 "dist": r.get("dist"),
                 "rank": rank,
-                "report": r.get("report"),
-                "attn_txt_path": r.get("attn_txt_path"),
-                "attn_img_path": r.get("attn_img_path"),
-                "attn_comb_path": r.get("attn_comb_path"),
-                "ig_path": r.get("ig_path"),
-                "gradcam_path": r.get("gradcam_path"),
-                "error": r.get("error"),
             }
             cm = r.get("compare_metrics") or {}
             for k, v in cm.items():
@@ -46,59 +90,61 @@ def flatten_retrievals(data: List[Dict[str,Any]]) -> pd.DataFrame:
                 except Exception:
                     base[k] = np.nan
             rows.append(base)
+        # test retrievals
+        for rank, r in enumerate(q.get("retrieval_test", []) or [], start=1):
+            base = {
+                "qid": qid,
+                "query_report": qreport,
+                "retrieval_db": "test",
+                "rid": r.get("rid"),
+                "dist": r.get("dist"),
+                "rank": rank,
+            }
+            cm = r.get("compare_metrics") or {}
+            for k, v in cm.items():
+                try:
+                    base[k] = float(v) if v is not None else np.nan
+                except Exception:
+                    base[k] = np.nan
+            rows.append(base)
+    if not rows:
+        return pd.DataFrame()
     df = pd.DataFrame(rows)
-    id_cols = ["qid", "rid", "rank", "dist", "report",
-               "query_report", "error",
-               "attn_txt_path", "attn_img_path", "attn_comb_path",
-               "ig_path", "gradcam_path"]
-    metric_cols = [c for c in df.columns if c not in id_cols]
-    ordered = id_cols + sorted(metric_cols)
-    ordered = [c for c in ordered if c in df.columns]
-    return df[ordered]
+    return df
 
 # ------------------------
-# Retrieval → Retrieval parsing
+# Retrieval-level flatten (R->R)
 # ------------------------
-def flatten_rr(data: List[Dict[str,Any]]) -> pd.DataFrame:
-    """
-    Flatten retrieval to retrieval metrics at query-level (one row per qid).
-    Works with keys like retrieval_overlap_iou5 / retrieval_diversity_score.
-    """
+def flatten_rr(data: List[Dict[str, Any]]) -> pd.DataFrame:
     rows = []
     for q in data:
         qid = q.get("qid")
         row = {"qid": qid}
-        found = False
-        for key in ["retrieval_overlap_iou5", "retrieval_diversity_score"]:
+        # copy keys we care about if present
+        for key in [
+            "retrieval_diversity_train", "retrieval_diversity_test",
+            "retrieval_label_diversity_train", "retrieval_label_diversity_test"
+        ]:
             if key in q:
                 try:
                     row[key] = float(q[key]) if q[key] is not None else np.nan
                 except Exception:
                     row[key] = np.nan
-                found = True
-        if found:
+        if len(row) > 1:
             rows.append(row)
+    if not rows:
+        return pd.DataFrame()
     return pd.DataFrame(rows)
 
 # ------------------------
-# Utility functions
+# Utility: simple summary
 # ------------------------
-def discover_metrics(df: pd.DataFrame) -> List[str]:
-    non_metric = {"qid","rid","rank","dist","report","query_report","error",
-                  "attn_txt_path","attn_img_path","attn_comb_path","ig_path","gradcam_path"}
-    return [c for c in df.columns if c not in non_metric]
-
-def get_metric_scores(df: pd.DataFrame, metric: str, dropna: bool = True) -> pd.DataFrame:
-    if metric not in df.columns:
-        raise KeyError(f"Metric '{metric}' not found. Available: {discover_metrics(df)}")
-    subset = df[["qid","rid","rank","dist","report", metric]].copy()
-    subset = subset.rename(columns={metric: "score"})
-    if dropna:
-        subset = subset[subset["score"].notna()]
-    return subset.sort_values(["qid","rank"])
-
 def summary_all_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    metrics = discover_metrics(df)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    # metrics are any numeric columns besides id-like
+    non_metric = {"qid", "rid", "rank", "retrieval_db", "query_report", "dist"}
+    metrics = [c for c in df.columns if c not in non_metric]
     rows = []
     total = len(df)
     for m in metrics:
@@ -106,95 +152,253 @@ def summary_all_metrics(df: pd.DataFrame) -> pd.DataFrame:
         cnt = int(s.count())
         rows.append({
             "metric": m,
-            "mean": float(s.mean()) if cnt>0 else np.nan,
-            "std": float(s.std()) if cnt>1 else np.nan,
-            "median": float(s.median()) if cnt>0 else np.nan,
-            "min": float(s.min()) if cnt>0 else np.nan,
-            "max": float(s.max()) if cnt>0 else np.nan,
+            "mean": float(s.mean()) if cnt > 0 else np.nan,
+            "std": float(s.std()) if cnt > 1 else np.nan,
+            "median": float(s.median()) if cnt > 0 else np.nan,
+            "min": float(s.min()) if cnt > 0 else np.nan,
+            "max": float(s.max()) if cnt > 0 else np.nan,
             "count_nonnull": cnt,
             "total_rows": total,
-            "pct_missing": 100.0 * (1.0 - cnt/total) if total>0 else np.nan
+            "pct_missing": 100.0 * (1.0 - cnt / total) if total > 0 else np.nan
         })
+    if not rows:
+        return pd.DataFrame()
     return pd.DataFrame(rows).set_index("metric").sort_index()
 
-def aggregate_per_qid(df: pd.DataFrame, metric: str, agg_funcs: Optional[List[str]] = None) -> pd.DataFrame:
-    if metric not in df.columns:
-        raise KeyError(f"Metric '{metric}' not found.")
-    if agg_funcs is None:
-        agg_funcs = ['mean','median','std','min','max','count']
-    s = df[["qid", metric]].copy()
-    s[metric] = pd.to_numeric(s[metric], errors="coerce")
-    group = s.groupby("qid").agg({metric: agg_funcs})
-    group.columns = ["_".join(col) if isinstance(col, tuple) else col for col in group.columns.values]
-    group = group.reset_index()
-    counts = df.groupby("qid").size().rename("total_retrieved").reset_index()
-    nonnulls = df.groupby("qid")[metric].apply(lambda x: x.notna().sum()).rename("nonnull_count").reset_index()
-    group = group.merge(counts, on="qid", how="left").merge(nonnulls, on="qid", how="left")
-    group["pct_missing"] = 100.0 * (1.0 - group["nonnull_count"] / group["total_retrieved"])
-    return group
+# ------------------------
+# Diversity metrics
+# ------------------------
+def compute_embedding_diversity(embeddings: np.ndarray) -> float:
+    """1 - mean_pairwise_cosine (range approx [0,2] but typically [0,1])"""
+    if embeddings is None or len(embeddings) < 2:
+        return 0.0
+    # normalize rows
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True).clip(min=1e-8)
+    normed = embeddings / norms
+    sim = np.dot(normed, normed.T)
+    n = sim.shape[0]
+    triu = np.triu_indices(n, k=1)
+    mean_cos = float(np.mean(sim[triu]))
+    return float(1.0 - mean_cos)
 
-def top_k_by_metric(df: pd.DataFrame, metric: str, k: int = 1, higher_is_better: bool = True) -> pd.DataFrame:
-    if metric not in df.columns:
-        raise KeyError(f"Metric '{metric}' not found.")
-    s = df[["qid","rid","rank","dist","report",metric]].copy()
-    s[metric] = pd.to_numeric(s[metric], errors="coerce")
-    s = s[s[metric].notna()].copy()
-    s = s.sort_values(["qid", metric], ascending=[True, not higher_is_better])
-    topk = s.groupby("qid").head(k).reset_index(drop=True)
-    topk["k_rank"] = topk.groupby("qid").cumcount()+1
-    return topk
+def compute_label_diversity_from_labels(labels_list: List[List[str]]) -> float:
+    """unique labels / avg per-item label count (simple proxy)."""
+    if not labels_list:
+        return 0.0
+    all_labels = set(l for lab in labels_list for l in lab)
+    sizes = [len(lab) for lab in labels_list]
+    sizes_nonzero = [s for s in sizes if s > 0]
+    if not sizes_nonzero:
+        return 0.0
+    avg_size = float(np.mean(sizes_nonzero))
+    return float(len(all_labels) / avg_size)
 
-def save_df(df: pd.DataFrame, outpath: str) -> None:
-    Path(outpath).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(outpath, index=False)
-    print(f"Saved: {outpath}")
+# ------------------------
+# Core retrieval runner (dual-engine)
+# ------------------------
+def run_retrieval_experiment(k: int = 5) -> List[Dict[str, Any]]:
+    import torch
+    from tqdm import tqdm
+    from Helpers import Config
+    from Model import MultiModalRetrievalModel
+    from Retrieval import make_retrieval_engine
+    from DataHandler import parse_openi_xml, build_dataloader
+    from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 
-# -----------------------
-# CLI
-# -----------------------
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Parse retrieval JSON and extract metric results (Q to R and R and R).")
-    parser.add_argument("--json", type=str, default="retrieval_diversity_score/retrieval_reports/retrieval_report.json",
-                        help="Path to retrieval JSON (list of queries).")
-    parser.add_argument("--out-dir", type=str, default="retrieval_diversity_score/retrieval_reports/",
-                        help="Directory to save flattened CSV and summaries.")
-    args = parser.parse_args()
+    BASE_DIR = Path(__file__).resolve().parent.parent.parent
+    CONFIG_PATH = BASE_DIR / "configs" / "config.yaml"
+    CKPT_PATH = BASE_DIR / "checkpoints" / "model_best.pt"
+    MODEL_DIR = BASE_DIR / "models"
+    EMBED_DIR = BASE_DIR / "embeddings"
+    XML_DIR = BASE_DIR / "data" / "openi" / "xml" / "NLMCXR_reports" / "ecgen-radiology"
+    DICOM_ROOT = BASE_DIR / "data" / "openi" / "dicom"
+    LABELS_CSV = BASE_DIR / "outputs" / "openi_labels_final.csv"
 
-    data = load_json(args.json)
+    cfg = Config.load(CONFIG_PATH)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
+    label_cols = list(combined_groups.keys())
 
-    # ---- Q→R ----
-    df = flatten_retrievals(data)
-    print(f"[Q to R] Flattened rows: {len(df)}  unique qids: {df['qid'].nunique() if 'qid' in df else 0}")
-    outdir = Path(args.out_dir); outdir.mkdir(parents=True, exist_ok=True)
-    save_df(df, str(outdir / "retrieval_metrics_flat.csv"))
-    summary = summary_all_metrics(df)
-    summary.to_csv(outdir / "retrieval_metrics_summary.csv")
-    print(summary.head(20))
+    # make both engines: train and test
+    engine_train = make_retrieval_engine(
+        str(EMBED_DIR / "train_joint_embeddings.npy"),
+        str(EMBED_DIR / "train_ids.json"),
+        method="dls",
+        link_threshold=0.5,
+        max_links=10
+    )
+    engine_test = make_retrieval_engine(
+        str(EMBED_DIR / "test_joint_embeddings.npy"),
+        str(EMBED_DIR / "test_ids.json"),
+        method="dls",
+        link_threshold=0.5,
+        max_links=10
+    )
 
-    # ---- R↔R ----
+    # model (for producing joint embedding of query)
+    model = MultiModalRetrievalModel(
+        joint_dim=cfg.joint_dim,
+        num_heads=cfg.num_heads,
+        num_fusion_layers=cfg.num_fusion_layers,
+        num_classes=len(label_cols),
+        fusion_type=cfg.fusion_type,
+        swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
+        bert_local_dir=MODEL_DIR / "clinicalbert_local",
+        checkpoint_path=str(CKPT_PATH),
+        use_shared_ffn=cfg.use_shared_ffn,
+        use_cls_only=cfg.use_cls_only,
+        device=device,
+        training=False
+    ).to(device)
+    model.eval()
+
+    # parsed_records -> build dataloader
+    parsed_records = parse_openi_xml(XML_DIR, DICOM_ROOT, combined_groups=combined_groups)
+    test_loader = build_dataloader(records=parsed_records, batch_size=1, mean=0.5, std=0.25, shuffle=False)
+
+    # load embedding banks (for computing embedding diversity)
+    train_embs = np.load(EMBED_DIR / "train_joint_embeddings.npy")
+    with open(EMBED_DIR / "train_ids.json") as f:
+        train_ids = json.load(f)
+    id_to_emb_train = {rid: train_embs[i] for i, rid in enumerate(train_ids)}
+
+    test_embs = np.load(EMBED_DIR / "test_joint_embeddings.npy")
+    with open(EMBED_DIR / "test_ids.json") as f:
+        test_ids = json.load(f)
+    id_to_emb_test = {rid: test_embs[i] for i, rid in enumerate(test_ids)}
+
+    # try to load labels table for label diversity (optional)
+    labels_df = None
+    try:
+        labels_df = pd.read_csv(LABELS_CSV).set_index("id")
+        print(f"[INFO] Loaded labels dataframe with {len(labels_df)} rows.")
+    except Exception:
+        print(f"[WARN] Could not load labels CSV at {LABELS_CSV}. Label diversity will be estimated from provided label lists if available.")
+
+    results = []
+    for batch in tqdm(test_loader, desc="Running Retrieval"):
+        qid = batch["id"][0]
+        img = batch["image"].to(device)
+        ids = batch["input_ids"].to(device)
+        mask = batch["attn_mask"].to(device)
+
+        with torch.no_grad():
+            out = model(img, ids, mask, return_attention=False)
+            q_vec = out["joint_emb"][0].cpu().numpy()
+
+        # -- retrieve from train DB
+        ret_train_ids, dists_train = engine_train.retrieve(q_vec, K=k)
+        emb_train = np.array([id_to_emb_train[r] for r in ret_train_ids if r in id_to_emb_train])
+        diversity_train = compute_embedding_diversity(emb_train)
+
+        # collect labels for train retrievals (if labels_df exists)
+        train_label_sets = []
+        if labels_df is not None:
+            for rid in ret_train_ids:
+                if rid in labels_df.index:
+                    row = labels_df.loc[rid]
+                    labs = [
+                        c for c, v in row.items()
+                        if pd.notna(v)
+                        and (str(v).strip() in ["1", "True", "true"])
+                    ]
+                    train_label_sets.append(labs)
+                else:
+                    train_label_sets.append([])
+        label_diversity_train = compute_label_diversity_from_labels(train_label_sets)
+
+        # -- retrieve from test DB
+        ret_test_ids, dists_test = engine_test.retrieve(q_vec, K=k)
+        emb_test = np.array([id_to_emb_test[r] for r in ret_test_ids if r in id_to_emb_test])
+        diversity_test = compute_embedding_diversity(emb_test)
+
+        test_label_sets = []
+        if labels_df is not None:
+            for rid in ret_test_ids:
+                if rid in labels_df.index:
+                    row = labels_df.loc[rid]
+                    # Safer label detection
+                    labs = [
+                        c for c, v in row.items()
+                        if pd.notna(v)
+                        and (str(v).strip() in ["1", "True", "true"])
+                    ]
+                    test_label_sets.append(labs)
+                else:
+                    test_label_sets.append([])
+        label_diversity_test = compute_label_diversity_from_labels(test_label_sets)
+
+        # build retrieval lists for JSON (no heavy compare metrics here)
+        retrieval_train = [{"rid": rid, "dist": float(d)} for rid, d in zip(ret_train_ids, dists_train)]
+        retrieval_test = [{"rid": rid, "dist": float(d)} for rid, d in zip(ret_test_ids, dists_test)]
+
+        results.append({
+            "qid": qid,
+            "query_report": batch.get("report_text", [None])[0] if isinstance(batch.get("report_text"), list) else None,
+            "retrieval_train": retrieval_train,
+            "retrieval_test": retrieval_test,
+            "retrieval_diversity_train": float(diversity_train),
+            "retrieval_diversity_test": float(diversity_test),
+            "retrieval_label_diversity_train": float(label_diversity_train),
+            "retrieval_label_diversity_test": float(label_diversity_test),
+        })
+
+    return results
+
+# ------------------------
+# Top-level runner (no argparse)
+# ------------------------
+def run_analysis(json_path: str, out_dir: str, run_retrieval: bool = False, k: int = 5):
+    json_path = Path(json_path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if run_retrieval:
+        print("[INFO] Running retrieval experiment (dual engines)...")
+        data = run_retrieval_experiment(k=k)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(f"[INFO] Retrieval JSON saved to: {json_path}")
+    else:
+        print("[INFO] Loading retrieval JSON from disk...")
+        data = load_json(str(json_path))
+
+    # Q->R flatten
+    df_qr = flatten_retrievals(data)
+    if not df_qr.empty:
+        qr_out = out_dir / "retrieval_metrics_flat.csv"
+        df_qr.to_csv(qr_out, index=False)
+        print(f"[INFO] Saved Q->R flattened CSV: {qr_out}")
+        summary_qr = summary_all_metrics(df_qr)
+        if not summary_qr.empty:
+            summary_qr.to_csv(out_dir / "retrieval_metrics_summary.csv")
+            print(f"[INFO] Saved Q->R metrics summary CSV")
+    else:
+        print("[WARN] No Q->R rows to save.")
+
+    # R->R flatten
     df_rr = flatten_rr(data)
     if not df_rr.empty:
-        print(f"[R and R] Rows: {len(df_rr)}  unique qids: {df_rr['qid'].nunique()}")
-        save_df(df_rr, str(outdir / "retrieval_retrieval_metrics.csv"))
+        rr_out = out_dir / "retrieval_retrieval_metrics.csv"
+        df_rr.to_csv(rr_out, index=False)
+        print(f"[INFO] Saved R->R CSV: {rr_out}")
         summary_rr = summary_all_metrics(df_rr)
-        summary_rr.to_csv(outdir / "retrieval_retrieval_summary.csv")
-        print(summary_rr.head(20))
+        if not summary_rr.empty:
+            summary_rr.to_csv(out_dir / "retrieval_retrieval_summary.csv")
+            print(f"[INFO] Saved R->R metrics summary CSV")
     else:
-        print("[R and R] No retrieval to retrieval metrics found in JSON.")
+        print("[INFO] No retrieval-level (R->R) metrics found in JSON.")
 
-    # Example: per-qid aggregation on Q→R metric
-    example_metrics = [m for m in ["txt2img_pearson","img2txt_pearson",
-                                   "final_patch_map_iou_5","final_patch_map_iou_20"]
-                       if m in discover_metrics(df)]
-    for m in example_metrics:
-        agg = aggregate_per_qid(df, m)
-        save_df(agg, str(outdir / f"per_qid_agg__{m}.csv"))
+    # Save a copy of the full JSON report
+    full_json_out = out_dir / json_path.name
+    with open(full_json_out, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    print(f"[INFO] Full JSON report copied to: {full_json_out}")
 
-    # Example: top-1 by pearson if exists
-    metric_for_topk = "final_patch_map_pearson" if "final_patch_map_pearson" in df.columns else None
-    if metric_for_topk:
-        top1 = top_k_by_metric(df, metric_for_topk, k=1, higher_is_better=True)
-        save_df(top1, str(outdir / f"top1_by__{metric_for_topk}.csv"))
-        print("Top-1 sample:")
-        print(top1.head(10))
+if __name__ == "__main__":
+    BASE_DIR = Path(__file__).resolve().parent.parent.parent
+    JSON_PATH = BASE_DIR / "retrieval_diversity_score" / "retrieval_report.json"
+    OUT_DIR = BASE_DIR / "retrieval_diversity_score" / "retrieval_reports"
+    # Set run_retrieval=True to compute retrievals (slow), or False to parse an existing JSON
+    run_analysis(json_path=JSON_PATH, out_dir=OUT_DIR, run_retrieval=True, k=5)

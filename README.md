@@ -36,7 +36,6 @@ project_root/
 ├── splited_data/       # Labeled + split datasets
 ├── models/             # Swin, BERT, Spacy models
 ├── src/                # Core Python code (see below)
-├── web/                # Flask web app (app.py, HTML/CSS)
 └── config/             # Training/eval config YAMLs
 ```
 
@@ -178,15 +177,15 @@ You can visualize:
 * IG/GAMCAM-based disease explanations
 
 ### Predict & Explain
-![Predict & Explain](demo/1.png)
-![Predict & Explain](demo/2.png)
-![Predict & Explain](demo/3.png)
-![Predict & Explain](demo/4.png)
-![Predict & Explain](demo/5.png)
-![Predict & Explain](demo/6.png)
+![Predict & Explain](demo/demo_1.png)
+![Predict & Explain](demo/demo_2.png)
+![Predict & Explain](demo/demo_3.png)
+![Predict & Explain](demo/demo_4.png)
+![Predict & Explain](demo/demo_5.png)
+![Predict & Explain](demo/demo_6.png)
 
 ### Retrieval Demo
-![Retrieval Demo](demo/3.png)
+![Retrieval Demo](demo/demo_4.png)
 ---
 
 ## Acknowledgments

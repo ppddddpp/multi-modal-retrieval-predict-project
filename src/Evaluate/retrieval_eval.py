@@ -16,7 +16,7 @@ from Helpers import Config
 from Model import MultiModalRetrievalModel
 from Retrieval import make_retrieval_engine
 from DataHandler import parse_openi_xml, build_dataloader
-from Helpers.retrieval_metrics import precision_at_k, mean_average_precision, mean_reciprocal_rank
+from Helpers.retrieval_metrics import precision_at_k, mean_average_precision, mean_reciprocal_rank, recall_at_k, ndcg_at_k
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 
 
@@ -153,6 +153,12 @@ def retrieval_eval(k=10, combined_groups=None):
     mrr_gen  = mean_reciprocal_rank(all_ret_gen, all_rel_gen)
     mrr_hist = mean_reciprocal_rank(all_ret_hist, all_rel_hist)
 
+    recall_gen = np.mean([recall_at_k(r, rel, k=k) for r, rel in zip(all_ret_gen, all_rel_gen)])
+    recall_hist = np.mean([recall_at_k(r, rel, k=k) for r, rel in zip(all_ret_hist, all_rel_hist)])
+
+    ndcg_gen = np.mean([ndcg_at_k(r, rel, k=k) for r, rel in zip(all_ret_gen, all_rel_gen)])
+    ndcg_hist = np.mean([ndcg_at_k(r, rel, k=k) for r, rel in zip(all_ret_hist, all_rel_hist)])
+
     # average query times (ms)
     avg_gen_ms  = 1000 * np.mean(gen_times)
     avg_hist_ms = 1000 * np.mean(hist_times)
@@ -161,6 +167,8 @@ def retrieval_eval(k=10, combined_groups=None):
     print(f"Historical    (test to train)  P@{k}: {p_hist:.4f}   AvgTime: {avg_hist_ms:.2f} ms")
     print(f"Generalization (test to test)   mAP: {map_gen:.4f}   MRR: {mrr_gen:.4f}")
     print(f"Historical    (test to train)  mAP: {map_hist:.4f}   MRR: {mrr_hist:.4f}")
+    print(f"Generalization (test to test)   Recall@{k}: {recall_gen:.4f}   NDCG@{k}: {ndcg_gen:.4f}")
+    print(f"Historical    (test to train)  Recall@{k}: {recall_hist:.4f}   NDCG@{k}: {ndcg_hist:.4f}")
 
     result_dir = BASE_DIR / "retrieval_eval_result"
     result_dir.mkdir(exist_ok=True)
@@ -171,6 +179,8 @@ def retrieval_eval(k=10, combined_groups=None):
         f.write(f"Historical    (test to train)  P@{k}: {p_hist:.4f}   AvgTime: {avg_hist_ms:.2f} ms\n")
         f.write(f"Generalization (test to test)   mAP: {map_gen:.4f}   MRR: {mrr_gen:.4f}\n")
         f.write(f"Historical    (test to train)  mAP: {map_hist:.4f}   MRR: {mrr_hist:.4f}\n")
+        f.write(f"Generalization (test to test)   Recall@{k}: {recall_gen:.4f}   NDCG@{k}: {ndcg_gen:.4f}\n")
+        f.write(f"Historical    (test to train)  Recall@{k}: {recall_hist:.4f}   NDCG@{k}: {ndcg_hist:.4f}\n")
     
     print(f"[INFO] Results saved to: {result_path}")
 

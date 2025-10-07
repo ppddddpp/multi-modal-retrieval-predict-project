@@ -228,6 +228,18 @@ if __name__ == "__main__":
     combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
     cfg = Config.load(CONFIG_DIR / 'config.yaml')
 
+    wandb.init(
+        project="LabelAttention-Training",
+        name=f"la_hidden{cfg.la_hidden_dim}_lr{cfg.la_lr}",
+        config={
+            "epochs": cfg.la_epochs,
+            "batch_size": cfg.la_batch_size,
+            "lr": cfg.la_lr,
+            "patience": cfg.la_patience,
+            "hidden_dim": cfg.la_hidden_dim,
+        },
+    )
+
     # --- Load records + split ---
     print("Loading records...")
     parsed_records = parse_openi_xml(XML_DIR, DICOM_ROOT, combined_groups=combined_groups)
@@ -287,7 +299,8 @@ if __name__ == "__main__":
             epochs=cfg.la_epochs,
             lr=cfg.la_lr,
             patience=cfg.la_patience,
-            val_dataset=pseudo_dataset_val
+            val_dataset=pseudo_dataset_val,
+            log_to_wandb=True,
         )
     else:
         print("Using cached LabelAttention model")
