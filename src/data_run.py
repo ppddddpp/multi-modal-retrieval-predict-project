@@ -40,11 +40,9 @@ if __name__ == "__main__":
                 out_path=OUTPUT_DIR / "openi_labels.csv", 
                 combined_groups=combined_groups)
 
-    """
     run_gemini_label_verifier(csv_in_path=OUTPUT_DIR / "openi_labels.csv", 
                                 csv_out_path=OUTPUT_DIR / "openi_labels_verified.csv", 
                                 batch_size=5, combined_groups=combined_groups)
-    """
 
     get_final_ouput_data(validated_data_path=OUTPUT_DIR / "openi_labels_verified.csv", 
                             out_path=OUTPUT_DIR / "openi_labels_final.csv", 

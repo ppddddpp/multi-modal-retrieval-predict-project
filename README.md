@@ -1,12 +1,7 @@
-# Multimodal Medical Image Retrieval & Explanation
+# Unified Multimodal Framework for Chest X-Ray Retrieval and Disease Prediction
 
-This is a HCMUS final project which performs **multimodal predict and retrieval** from chest X-rays and radiology reports using deep learning. It supports:
-
-* Disease-aware joint embeddings from image and text (DICOM + report)
-* Making prediction
-* Retrieval evaluation via relevance ground truth
-* Visual explanations (attention + Integrated Gradients)
-* Web interface for demo and debugging
+This repository contains the official implementation of **"A Unified Multimodal Framework for Chest X-Ray Retrieval and Disease Prediction: Towards Interpretable and Reproducible Medical AI."**  
+It was developed as part of the HCMUS final project and integrates multimodal learning, retrieval, and explainability for medical imaging.
 
 ---
 
@@ -14,13 +9,11 @@ This is a HCMUS final project which performs **multimodal predict and retrieval*
 
 ### Features
 
-* DICOM image preprocessing
-* Report tokenization using ClinicalBERT
-* Cross-modal attention fusion (Swin + BERT)
-* Embedding generation for test/query sets
-* Retrieval evaluation using shared disease labels
-* Attention & IG-based explanation heatmaps
-* Flask web interface for demo/explanation
+* Disease-aware joint embeddings from image and text (DICOM + report)
+* Knowledge-graph integration for semantic consistency and reranking
+* Multimodal disease prediction and retrieval
+* Attention-based and Integrated Gradient (IG) explanations
+* Flask web interface for interactive demo and debugging
 
 ---
 
@@ -29,122 +22,75 @@ This is a HCMUS final project which performs **multimodal predict and retrieval*
 ```
 project_root/
 ├── data/               # Raw input (DICOM, XML)
+├── knowledge_graph/    # KG triples, embeddings, node2id/relation2id
 ├── embeddings/         # Generated embedding files (.npy, .json)
 ├── checkpoints/        # Model weights
-├── outputs/            # Labeled CSVs
+├── outputs/            # Labeled CSVs and evaluation logs
 ├── ground_truths/      # JSONs with test-to-train relevance
-├── splited_data/       # Labeled + split datasets
-├── models/             # Swin, BERT, Spacy models
-├── src/                # Core Python code (see below)
+├── splited_data/       # Split datasets
+├── models/             # Swin, BERT, Spacy, etc.
+├── src/                # Core Python code
 └── config/             # Training/eval config YAMLs
 ```
-
-### Notable `src/` files:
-
-* `fusion.py` – CrossModalFusion + Swin/BERT backbone
-* `multimodal_retrieval.py` – Core model forward logic
-* `dataParser.py` – XML parsing, disease labeling
-* `dataLoader.py` – Dataset + DataLoader creation
-* `contructGT.py` – Build test-query relevance maps
-* `contruct_test_db.py` – Generate embeddings for test queries
-* `explanation.py` – Generate IG and attention maps
-* `finalOutputData.py` – Apply verified manual labels
-* `config.py` – Structured config with auto `run_name`
 
 ---
 
 ## Getting Started
 
-### 1. Install Dependencies
+### 1. Installation
 
 ```bash
 pip install -r requirements.txt
-```
-
-Also install `en_core_sci_sm` from [SciSpaCy](https://allenai.github.io/scispacy/):
-
-```bash
 pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_sm-0.5.1.tar.gz
 ```
 
----
-
-### 2. Prepare Data
+### 2. Data Preparation
 
 * Place XML reports under `data/openi/xml/`
 * Place DICOMs under `data/openi/dicom/`
+* Verify MeSH label coverage:
+    ```bash
+    python src/dataEDAnLabeledCheck.py
+    ```
 
-(Optional) Run:
+### 3. Labeling and Splitting
 
-```bash
-python src/dataEDAnLabeledCheck.py
-```
+    ```bash
+    python src/data_run.py
+    ```
 
-To explore and verify MeSH label coverage.
+Generates `outputs/openi_labels_final.csv`.  
+Split datasets are stored in `splited_data/`.
 
----
-
-### 3. Label the Reports
-
-```bash
-python src/finalOutputData.py
-```
-
-This will create `outputs/openi_labels_final.csv`.
-
----
-
-### 4. Split Dataset
-
-Split and label CSVs should already exist in `splited_data/`. If not, create them manually or using EDA scripts.
-
----
-
-### 5. Generate Embeddings
-
-Embedding for retrieval can be generate while train `.npy` and `.json` files under `embeddings/` or get from testset when run:
+## 4. Train Knowledge Graph and Model
 
 ```bash
-python src/contruct_test_db.py
+python src/Trainner/train.py
 ```
 
----
+Trained CompGCN/TransE embeddings saved in `knowledge_graph/` and trained model saved in `checkpoints/`
 
-### 6. Build Ground Truth
+
+### 6. Retrieval Evaluation
 
 ```bash
-python src/contructGT.py
+python src/Helpers/contructGT.py
 ```
 
-Will create `ground_truths/test_relevance.json` and `test_to_train_relevance.json`.
+Generates `ground_truths/test_relevance.json`.
 
----
+Metrics include:
+* Precision@K, Recall@K, nDCG, mAP  
+* Per-class AUROC/F1 table  
+* Statistical significance testing for ablation gains  
 
-### 7. Launch Web Demo
+### 7. Web Demo
 
 ```bash
-python web/app.py
+python src/web/app.py
 ```
 
-Then open `http://127.0.0.1:5000` in your browser.
-
----
-
-## Configuration
-
-Edit YAML under `config/`, which `config/config.yaml` for model setup for example:
-
-```yaml
-epochs: 50
-batch_size: 4
-fusion_type: "cross"
-use_hybrid: true
-joint_dim: 1024
-num_heads: 32
-lr: 2e-5
-```
-
-This will automatically generate a unique `run_name`.
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000) to explore the interface.
 
 ---
 
@@ -152,50 +98,61 @@ This will automatically generate a unique `run_name`.
 
 * PyTorch
 * HuggingFace Transformers
-* TimM (for Swin Transformer)
+* TimM (Swin Transformer)
 * SciSpaCy (`en_core_sci_sm`)
-* Flask (for web app)
-* Captum (for explanation via IG)
-* pydicom, matplotlib, seaborn, pandas, etc.
-
+* Flask
+* Captum (for explainability)
+* scikit-learn, numpy, pandas, networkx, rdflib
+* Additional can be found in requirement.txt
 ---
 
 ## Evaluation
 
-* Retrieval uses label overlap as relevance.
-* Metrics include precision\@k, recall\@k (custom code not shown here).
-* Attention and IG maps support explanation of fusion-based predictions.
+Retrieval relevance is based on label overlap and ontology-aware relationships.  
+Evaluation reports include:
+* Per-class metrics table (AUROC, F1)
+* Confusion and calibration plots
+* Statistical significance for ablation gains (paired t-test)
 
 ---
 
-## Example
-
-You can visualize:
-
-* Top retrieved similar cases
-* Text-to-image attention heatmaps
-* IG/GAMCAM-based disease explanations
+## Example Demos
 
 ### Predict & Explain
 ![Predict & Explain](demo/demo_1.png)
 ![Predict & Explain](demo/demo_2.png)
 ![Predict & Explain](demo/demo_3.png)
-![Predict & Explain](demo/demo_4.png)
-![Predict & Explain](demo/demo_5.png)
-![Predict & Explain](demo/demo_6.png)
 
 ### Retrieval Demo
 ![Retrieval Demo](demo/demo_4.png)
+![Predict & Explain](demo/demo_5.png)
+![Predict & Explain](demo/demo_6.png)
+---
+
+## Dataset
+
+* **NIH OpenI Dataset** — Chest X-rays and associated reports.  
+  [https://openi.nlm.nih.gov](https://openi.nlm.nih.gov)
+
+---
+
+## Trained Models & Embeddings
+
+Pretrained models and embeddings are available at:  
+[https://huggingface.co/ppddddpp/unified-multimodal-chestxray](https://huggingface.co/ppddddpp/unified-multimodal-chestxray)
+
 ---
 
 ## Acknowledgments
 
-* [NIH Open-i Dataset](https://openi.nlm.nih.gov/faq#collection)
-* [DOID](http://purl.obolibrary.org/obo/doid.obo)
-* [RADLEX](https://bioportal.bioontology.org/ontologies/RADLEX)
-* SciSpaCy / ClinicalBERT / Swin Transformer
-* Captum (Facebook AI)
+* [OpenI Dataset](https://openi.nlm.nih.gov/)
+* [Disease Ontology (DOID)](http://purl.obolibrary.org/obo/doid.obo)
+* [RadLex Ontology](https://bioportal.bioontology.org/ontologies/RADLEX)
+* ClinicalBERT / Swin Transformer / SciSpaCy / Captum
 
-## Trained model and embeddings 
+---
 
-Can be found via [HuggingFace link](https://huggingface.co/ppddddpp/multi-modal-retrieval-predict)
+## Reproducibility
+
+All source code, pretrained models, and configuration files are publicly available to ensure full reproducibility.  
+Scripts for data preprocessing, training, retrieval evaluation, and visualization are included under `src/`.
