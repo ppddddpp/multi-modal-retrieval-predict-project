@@ -81,24 +81,21 @@ class DICOMImagePreprocessor:
         intercept = float(getattr(dcm, 'RescaleIntercept', 0.0))
         scaled = raw * slope + intercept
 
-        # WindowCenter / WindowWidth
+        # Rescale
+        slope = float(getattr(dcm, 'RescaleSlope', 1.0))
+        intercept = float(getattr(dcm, 'RescaleIntercept', 0.0))
+        scaled = raw * slope + intercept
+
+        # WindowCenter / WindowWidth via percentiles
         pmin, pmax = np.percentile(scaled, [0.5, 99.5])
-        wc = (pmin + pmax) / 2
+        wc = (pmin + pmax) / 2.0
         ww = pmax - pmin
-
-        # DEBUG LOGGING
-        print(f"[DEBUG] {dicom_path}")
-        print(f"  raw min/max    = {raw.min():.1f}/{raw.max():.1f}")
-        print(f"  slope,intercpt = {slope:.3f}, {intercept:.3f}")
-        print(f"  scaled min/max = {scaled.min():.1f}/{scaled.max():.1f}")
-        print(f"  window center  = {wc:.1f}, width = {ww:.1f}")
-
+        lower, upper = wc - ww / 2.0, wc + ww / 2.0
+        
         # Window + normalize
-        lower, upper = wc - ww/2, wc + ww/2
         win = np.clip(scaled, lower, upper)
-        norm = (scaled - scaled.min()) / (scaled.max() - scaled.min())
-
-        print(f"  post-win min/max = {norm.min():.3f}/{norm.max():.3f}\n")
+        norm = (win - lower) / (upper - lower + 1e-8)
+        norm = np.clip(norm, 0.0, 1.0)
 
         return norm
 

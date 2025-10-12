@@ -39,8 +39,8 @@ cont_weight: 0.35
 kg_weight: 0.5
 weight_img_joint : 0.5
 weight_text_joint : 0.5
-gamma_focal: 1.5
-focal_ratio: 0.4
+gamma_focal: 1.0
+focal_ratio: 0.3
 temperature: 0.125
 
 # Label aware parameters

@@ -191,6 +191,8 @@ You can visualize:
 ## Acknowledgments
 
 * [NIH Open-i Dataset](https://openi.nlm.nih.gov/faq#collection)
+* [DOID](http://purl.obolibrary.org/obo/doid.obo)
+* [RADLEX](https://bioportal.bioontology.org/ontologies/RADLEX)
 * SciSpaCy / ClinicalBERT / Swin Transformer
 * Captum (Facebook AI)
 
