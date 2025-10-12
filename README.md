@@ -48,10 +48,7 @@ pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/e
 
 * Place XML reports under `data/openi/xml/`
 * Place DICOMs under `data/openi/dicom/`
-* Verify MeSH label coverage:
-    ```bash
-    python src/dataEDAnLabeledCheck.py
-    ```
+* Overview of data folder structure can be found at dataFolderStructure.txt
 
 ### 3. Labeling and Splitting
 
@@ -77,8 +74,7 @@ Trained CompGCN/TransE embeddings saved in `knowledge_graph/` and trained model 
 python src/Helpers/contructGT.py
 ```
 
-Generates `ground_truths/test_relevance.json`.
-
+Generates `ground_truths/test_relevance.json`. Then run evaluate in `src/Evaluate/`
 Metrics include:
 * Precision@K, Recall@K, nDCG, mAP  
 * Per-class AUROC/F1 table  
