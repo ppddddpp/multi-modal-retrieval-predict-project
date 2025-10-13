@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
-from safetensors.torch import save_file as save_safetensors
+from safetensors.torch import save_model
 
 from DataHandler import parse_openi_xml, build_dataloader
 from Model import Backbones
@@ -319,17 +319,16 @@ def train(
             "swin/epoch": epoch
         })
 
-
         # Save best
         if composite > best_score:
             best_score = composite
             best_epoch = epoch
             try:
-                save_safetensors(model.state_dict(), str(out_path))
-                print(f"[INFO] Saved best model checkpoint to {out_path} (epoch {epoch})")
+                save_model(model, str(out_path))
+                print(f"[INFO] Saved best model checkpoint (safe) to {out_path} (epoch {epoch})")
             except Exception as e:
-                torch.save(model.state_dict(), str(out_path.with_suffix(".pth")))
-                print(f"[WARN] safetensors save failed ({e}), saved .pth instead")
+                print(f"[ERROR] safetensors save_model failed: {e}")
+                raise
 
     print(f"[DONE] Best composite score: {best_score:.4f} at epoch {best_epoch}")
     print(f"[INFO] Final best checkpoint written to {out_path}")
