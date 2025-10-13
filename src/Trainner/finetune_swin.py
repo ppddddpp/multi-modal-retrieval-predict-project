@@ -164,7 +164,7 @@ def train(
 
     epochs = cfg.epochs
     batch_size = cfg.batch_size
-    lr = cfg.lr
+    lr = 1e-4 if lr is None else lr
 
     # Prepare records
     xml_dir = BASE_DIR / 'data' / 'openi' / 'xml' / 'NLMCXR_reports' / 'ecgen-radiology'
@@ -186,7 +186,9 @@ def train(
     label_counts = np.array([r['labels'] for r in train_records]).sum(axis=0)
     num_samples = len(train_records)
     label_counts = torch.tensor(label_counts, dtype=torch.float32)
-    pos_weight = ((num_samples - label_counts).clamp(min=1.0) / label_counts.clamp(min=1.0)).to(device)
+    pos_weight = ((num_samples - label_counts).clamp(min=1.0) / label_counts.clamp(min=1.0))
+    pos_weight = torch.log1p(pos_weight)  # smooth scaling
+    pos_weight = pos_weight.to(device)
 
     print("[DEBUG] pos_weight stats:", pos_weight.min().item(), pos_weight.max().item())
 
@@ -225,7 +227,7 @@ def train(
         param_groups.append({"params": backbone_params, "lr": lr * 0.1})
 
     optimizer = optim.AdamW(param_groups, lr=lr, weight_decay=weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=max(1, epochs * len(train_loader)), eta_min=1e-7)
+    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     best_score = -float("inf")
@@ -247,10 +249,11 @@ def train(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            scheduler.step()
+            
             running_loss += loss.item() * imgs.size(0)
 
         epoch_train_loss = running_loss / len(train_loader.dataset)
+        scheduler.step()
 
         # Validation
         model.eval()
@@ -289,7 +292,7 @@ def train(
         except Exception:
             macro_auc = np.nan
 
-        composite = 0.5 * macro_f1 + 0.5 * (macro_auc if not np.isnan(macro_auc) else 0)
+        composite = 0.3*macro_f1 + 0.7*macro_auc
 
         print(
             f"[E{epoch}] train_loss={epoch_train_loss:.4f} | val_loss={val_loss:.4f} | "
@@ -321,14 +324,12 @@ def train(
         if composite > best_score:
             best_score = composite
             best_epoch = epoch
-            vision_state = backbones.vision.state_dict()
-            vision_state_cpu = {k: v.cpu() for k, v in vision_state.items()}
             try:
-                save_safetensors(vision_state_cpu, str(out_path))
-                print(f"[INFO] Saved best swin checkpoint to {out_path} (epoch {epoch})")
+                save_safetensors(model.state_dict(), str(out_path))
+                print(f"[INFO] Saved best model checkpoint to {out_path} (epoch {epoch})")
             except Exception as e:
-                torch.save(vision_state_cpu, str(out_path.with_suffix(".pth")))
-                print(f"[WARN] safetensors save failed ({e}), saved torch .pth instead")
+                torch.save(model.state_dict(), str(out_path.with_suffix(".pth")))
+                print(f"[WARN] safetensors save failed ({e}), saved .pth instead")
 
     print(f"[DONE] Best composite score: {best_score:.4f} at epoch {best_epoch}")
     print(f"[INFO] Final best checkpoint written to {out_path}")
