@@ -52,9 +52,9 @@ pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/e
 
 ### 3. Labeling and Splitting
 
-    ```bash
-    python src/data_run.py
-    ```
+```bash
+python src/data_run.py
+```
 
 Generates `outputs/openi_labels_final.csv`.  
 Split datasets are stored in `splited_data/`.
@@ -68,7 +68,7 @@ python src/Trainner/train.py
 Trained CompGCN/TransE embeddings saved in `knowledge_graph/` and trained model saved in `checkpoints/`
 
 
-### 6. Retrieval Evaluation
+### 5. Retrieval Evaluation
 
 ```bash
 python src/Helpers/contructGT.py
@@ -80,7 +80,7 @@ Metrics include:
 * Per-class AUROC/F1 table  
 * Statistical significance testing for ablation gains  
 
-### 7. Web Demo
+### 6. Web Demo
 
 ```bash
 python src/web/app.py

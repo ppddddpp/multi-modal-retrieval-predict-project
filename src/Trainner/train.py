@@ -22,6 +22,7 @@ from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 from Helpers import kg_alignment_loss, contrastive_loss, Config, safe_roc_auc, safe_avg_precision
 from KnowledgeGraph import KGBuilder, KGTrainer
+from .finetune_swin import train as swin_finetune
 import wandb
 import pandas as pd
 from dotenv import load_dotenv
@@ -281,6 +282,33 @@ if __name__ == '__main__':
         },
     }
 
+    # SWIN metrics panel
+    wandb.define_metric("swin/epoch")
+    wandb.define_metric("swin/*", step_metric="swin/epoch")
+    wandb.define_metric("swin/train_loss", step_metric="swin/epoch")
+    wandb.define_metric("swin/val_loss", step_metric="swin/epoch")
+    
+    # Optional explicit definitions (not strictly required since "swin/*" covers all)
+    wandb.define_metric("swin/train_loss", step_metric="swin/epoch")
+    wandb.define_metric("swin/val_loss", step_metric="swin/epoch")
+    wandb.define_metric("swin/f1_macro", step_metric="swin/epoch")
+    wandb.define_metric("swin/precision_macro", step_metric="swin/epoch")
+    wandb.define_metric("swin/recall_macro", step_metric="swin/epoch")
+    wandb.define_metric("swin/auc_macro", step_metric="swin/epoch")
+    wandb.define_metric("swin/ap_macro", step_metric="swin/epoch")
+
+    # Finetune SWIN 
+    swin_ckpt_path = MODEL_DIR / "finetuned_swin_labelaware.safetensors"
+    if not swin_ckpt_path.exists():
+        print("Finetuning SWIN...")
+        swin_finetune(
+            finetune_mode="full",
+            out_path=swin_ckpt_path
+        )
+    else:
+        print(f"Using cached Swin checkpoint at {swin_ckpt_path}")
+    torch.cuda.empty_cache()
+
     # Used groups
     combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
     
@@ -433,7 +461,6 @@ if __name__ == '__main__':
         "pos_weight/median": float(np.median(pw_np)),
     })
 
-
     # Inverse frequency for Focal Loss
     pos_freq_t = torch.tensor(pos_freq_np, dtype=torch.float32).to(device)
     inv_freq = 1.0 / pos_freq_t.clamp(min=1e-3)  
@@ -460,7 +487,7 @@ if __name__ == '__main__':
         num_heads=num_heads,
         fusion_type=FUSION_TYPE,
         img_backbone=image_backbone,
-        swin_ckpt_path=MODEL_DIR / "swin_checkpoint.safetensors",
+        swin_ckpt_path=MODEL_DIR / "finetuned_swin_labelaware.safetensors",
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
         device=device,
         use_shared_ffn=cfg.use_shared_ffn,
