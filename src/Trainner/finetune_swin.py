@@ -6,6 +6,7 @@ except NameError:
     base = Path.cwd().parent
 sys.path.append(str(base))
 
+import wandb
 import json
 import torch
 import torch.nn as nn
@@ -39,18 +40,19 @@ def get_device():
 
 
 def build_finetune_subset(xml_dir, dicom_root, combined_groups, split_dir,
-                            finetune_ratio=0.4, train_ratio=0.75, seed=42):
+                          finetune_ratio=0.4, train_ratio=0.75, seed=42, max_retry=20):
     """
-    Build finetune records:
+    Build a balanced finetune subset:
         - Start from TRAIN SPLIT ONLY (no leakage from val/test).
         - Take finetune_ratio portion of train (e.g. 0.4 = 40%).
-        - Split that subset into train_ratio for train (e.g. 0.75 = 30%) 
-            and rest for validation (e.g. 0.25 = 10%).
+        - Split that subset into train_ratio for train and rest for validation.
+        - Retry random splits if validation set has any label with all zeros.
     """
-    records = parse_openi_xml(xml_dir, dicom_root, combined_groups=combined_groups)
     import pandas as pd
     rng = np.random.default_rng(seed)
 
+    # Load all parsed records and label CSV
+    records = parse_openi_xml(xml_dir, dicom_root, combined_groups=combined_groups)
     lab_path = BASE_DIR / "outputs" / "openi_labels_final.csv"
     if not lab_path.exists():
         raise FileNotFoundError(f"Labels CSV not found: {lab_path}")
@@ -64,28 +66,38 @@ def build_finetune_subset(xml_dir, dicom_root, combined_groups, split_dir,
             r2["labels"] = labels_df.loc[r["id"], label_cols].tolist()
             filtered.append(r2)
 
-    # Load original splits
+    # Load original train split IDs
     with open(split_dir / "train_split_ids.json") as f:
         train_ids = set(json.load(f))
-
     train_records_full = [r for r in filtered if r["id"] in train_ids]
 
-    # Shuffle and pick subset (40%)
-    idx = rng.permutation(len(train_records_full))
-    subset_size = int(len(idx) * finetune_ratio)
-    subset_idx = idx[:subset_size]
-    subset_records = [train_records_full[i] for i in subset_idx]
+    # Retry to get a balanced validation subset
+    for attempt in range(max_retry):
+        idx = rng.permutation(len(train_records_full))
+        subset_size = int(len(idx) * finetune_ratio)
+        subset_idx = idx[:subset_size]
+        subset_records = [train_records_full[i] for i in subset_idx]
 
-    # Split into finetune-train (30%) and finetune-val (10%)
-    split = int(len(subset_records) * train_ratio)
-    ft_train_records = subset_records[:split]
-    ft_val_records = subset_records[split:]
+        split = int(len(subset_records) * train_ratio)
+        ft_train_records = subset_records[:split]
+        ft_val_records = subset_records[split:]
+
+        val_labels = np.array([r["labels"] for r in ft_val_records])
+        all_zero = (val_labels.sum(axis=0) == 0).sum()
+        all_one = (val_labels.sum(axis=0) == len(val_labels)).sum()
+
+        if all_zero == 0 and all_one == 0:
+            print(f"[INFO] Found balanced split on attempt {attempt + 1}")
+            break
+        else:
+            print(f"[WARN] Unbalanced val split on attempt {attempt + 1} (all_zero={all_zero}, all_one={all_one})")
+    else:
+        print(f"[WARN] Could not perfectly balance after {max_retry} attempts; continuing with last split.")
 
     print(f"[INFO] Finetune subset built: total_train={len(train_records_full)}, "
-            f"subset={len(subset_records)} (train={len(ft_train_records)}, val={len(ft_val_records)})")
+          f"subset={len(subset_records)} (train={len(ft_train_records)}, val={len(ft_val_records)})")
 
     return ft_train_records, ft_val_records, label_cols
-
 
 def freeze_backbone(backbones: Backbones):
     for p in backbones.parameters():
@@ -287,6 +299,23 @@ def train(
             f"AP(macro/micro)={macro_ap:.3f}/{micro_ap:.3f} | "
             f"AUC(macro)={macro_auc:.3f}"
         )
+
+        wandb.log({
+            "swin/train_loss": epoch_train_loss,
+            "swin/val_loss": val_loss,
+            "swin/f1_macro": macro_f1,
+            "swin/f1_micro": micro_f1,
+            "swin/precision_macro": macro_prec,
+            "swin/precision_micro": micro_prec,
+            "swin/recall_macro": macro_rec,
+            "swin/recall_micro": micro_rec,
+            "swin/auc_macro": macro_auc,
+            "swin/ap_micro": micro_ap,
+            "swin/ap_macro": macro_ap,
+            "swin/composite": composite,
+            "swin/epoch": epoch
+        })
+
 
         # Save best
         if composite > best_score:

@@ -22,7 +22,7 @@ from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 from Helpers import kg_alignment_loss, contrastive_loss, Config, safe_roc_auc, safe_avg_precision
 from KnowledgeGraph import KGBuilder, KGTrainer
-from .finetune_swin import train as swin_finetune
+from finetune_swin import train as swin_finetune
 import wandb
 import pandas as pd
 from dotenv import load_dotenv
