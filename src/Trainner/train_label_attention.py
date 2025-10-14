@@ -143,7 +143,9 @@ def train_label_attention(
     device="cuda" if torch.cuda.is_available() else "cpu",
     log_to_wandb=False,
     val_dataset=None,
-    loss_type="infonce",
+    la_ice_weight=None,
+    la_tpl_weight=None,
+    la_bce_weight=None
 ):
     """
     Train a LabelAttention model with InfoNCE loss.
@@ -186,15 +188,14 @@ def train_label_attention(
         total_loss = 0.0
 
         for batch in tqdm(loader, desc=f"LabelAttention Epoch {epoch}/{epochs}"):
-            if loss_type == "infonce":
-                qids, pids = batch
-                labels = None
-            elif loss_type == "bce":
+            labels = None
+            if len(batch) == 3:
                 qids, pids, labels = batch
                 labels = labels.to(device)
+            else:
+                qids, pids = batch
 
             batch_q, batch_p, mask_q, mask_p = [], [], [], []
-
             # collect embeddings for batch
             for qid, pid in zip(qids, pids):
                 def get_and_mask(rid):
@@ -232,10 +233,36 @@ def train_label_attention(
             q_rep, _ = model(q_batch, mask=q_mask_batch)
             p_rep, _ = model(p_batch, mask=p_mask_batch)
 
-            if loss_type == "infonce":
-                loss = info_nce_loss(q_rep, p_rep, model.temperature)
-            elif loss_type == "bce":
-                loss = contrastive_bce_loss(q_rep, p_rep, labels, model.temperature)
+            loss_total = 0.0
+            loss_terms = {}
+
+            # --- InfoNCE ---
+            if la_ice_weight > 0:
+                loss_infonce = info_nce_loss(q_rep, p_rep, model.temperature)
+                loss_total += la_ice_weight * loss_infonce
+                loss_terms["loss_infonce"] = float(loss_infonce.detach().cpu())
+
+            # --- Triplet ---
+            if la_tpl_weight > 0:
+                # need negatives for triplet
+                neg_idx = torch.randperm(p_rep.size(0))
+                neg_rep = p_rep[neg_idx]
+                d_pos = 1.0 - F.cosine_similarity(q_rep, p_rep, dim=1)
+                d_neg = 1.0 - F.cosine_similarity(q_rep, neg_rep, dim=1)
+                loss_triplet = F.relu(1.0 + d_pos - d_neg).mean()
+                loss_total += la_tpl_weight * loss_triplet
+                loss_terms["loss_triplet"] = float(loss_triplet.detach().cpu())
+
+            # --- BCE ---
+            if la_bce_weight > 0 and labels is not None:
+                sim = (q_rep * p_rep).sum(dim=1) / (
+                    q_rep.norm(dim=1) * p_rep.norm(dim=1) + 1e-12
+                )
+                loss_bce = F.binary_cross_entropy_with_logits(sim, labels.float().to(sim.device))
+                loss_total += la_bce_weight * loss_bce
+                loss_terms["loss_bce"] = float(loss_bce.detach().cpu())
+
+            loss = loss_total
 
             # backward
             loss.backward()
@@ -254,13 +281,13 @@ def train_label_attention(
             val_loss = 0.0
             with torch.no_grad():
                 for batch in val_loader:
-                    if loss_type == "infonce":
-                        qids, pids = batch
-                        labels = None
-                    elif loss_type == "bce":
+                    labels = None
+                    if len(batch) == 3:
                         qids, pids, labels = batch
                         labels = labels.to(device)
-
+                    else:
+                        qids, pids = batch
+                    
                     batch_q, batch_p, mask_q, mask_p = [], [], [], []
                     for qid, pid in zip(qids, pids):
                         def get_and_mask(rid):
@@ -280,10 +307,36 @@ def train_label_attention(
                     q_rep, _ = model(q_batch, mask=q_mask_batch)
                     p_rep, _ = model(p_batch, mask=p_mask_batch)
 
-                    if loss_type == "infonce":
-                        loss = info_nce_loss(q_rep, p_rep, model.temperature)
-                    elif loss_type == "bce":
-                        loss = contrastive_bce_loss(q_rep, p_rep, labels, model.temperature)
+                    loss_total = 0.0
+                    loss_terms = {}
+
+                    # --- InfoNCE ---
+                    if la_ice_weight > 0:
+                        loss_infonce = info_nce_loss(q_rep, p_rep, model.temperature)
+                        loss_total += la_ice_weight * loss_infonce
+                        loss_terms["loss_infonce"] = float(loss_infonce.detach().cpu())
+
+                    # --- Triplet ---
+                    if la_tpl_weight > 0:
+                        # need negatives for triplet
+                        neg_idx = torch.randperm(p_rep.size(0))
+                        neg_rep = p_rep[neg_idx]
+                        d_pos = 1.0 - F.cosine_similarity(q_rep, p_rep, dim=1)
+                        d_neg = 1.0 - F.cosine_similarity(q_rep, neg_rep, dim=1)
+                        loss_triplet = F.relu(1.0 + d_pos - d_neg).mean()
+                        loss_total += la_tpl_weight * loss_triplet
+                        loss_terms["loss_triplet"] = float(loss_triplet.detach().cpu())
+
+                    # --- BCE ---
+                    if la_bce_weight > 0 and labels is not None:
+                        sim = (q_rep * p_rep).sum(dim=1) / (
+                            q_rep.norm(dim=1) * p_rep.norm(dim=1) + 1e-12
+                        )
+                        loss_bce = F.binary_cross_entropy_with_logits(sim, labels.float().to(sim.device))
+                        loss_total += la_bce_weight * loss_bce
+                        loss_terms["loss_bce"] = float(loss_bce.detach().cpu())
+
+                    loss = loss_total
 
                     val_loss += loss.item()
 
@@ -414,6 +467,9 @@ if __name__ == "__main__":
             patience=cfg.la_patience,
             val_dataset=pseudo_dataset_val,
             log_to_wandb=True,
+            la_ice_weight=cfg.la_ice_weight,
+            la_tpl_weight=cfg.la_tpl_weight,
+            la_bce_weight=cfg.la_bce_weight
         )
     else:
         print("Using cached LabelAttention model")

@@ -56,6 +56,9 @@ class Config:
     la_epochs: int = 30
     la_lr: float = 5e-4
     la_patience: int = 5
+    la_ice_weight: float = 1.0
+    la_tpl_weight: float = 0.5
+    la_bce_weight: float = 0.1
 
     # Sampler parameters
     pos_weight_clamp_max: float = 1.0
