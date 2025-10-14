@@ -85,7 +85,7 @@ def find_dicom_file(rid: str) -> Path:
     primary = list(Path(DICOM_ROOT).rglob(f"{rid}.dcm"))
     if primary:
         return primary[0]
-
+    
     # Try fallback without leading patient ID
     parts = rid.split("_")
     fallback_id = "_".join(parts[1:]) if len(parts) > 1 else rid

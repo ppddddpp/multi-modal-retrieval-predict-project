@@ -54,4 +54,4 @@ la_patience: 10
 pos_weight_clamp_max: 5.0
 
 # Wandb parameters
-project_name: "multimodal-disease-classification-2609-experiments"
+project_name: "multimodal-disease-classification-1410-experiments"

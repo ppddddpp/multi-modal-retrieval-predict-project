@@ -21,16 +21,17 @@ It was developed as part of the HCMUS final project and integrates multimodal le
 
 ```
 project_root/
-├── data/               # Raw input (DICOM, XML)
-├── knowledge_graph/    # KG triples, embeddings, node2id/relation2id
-├── embeddings/         # Generated embedding files (.npy, .json)
-├── checkpoints/        # Model weights
-├── outputs/            # Labeled CSVs and evaluation logs
-├── ground_truths/      # JSONs with test-to-train relevance
-├── splited_data/       # Split datasets
-├── models/             # Swin, BERT, Spacy, etc.
-├── src/                # Core Python code
-└── config/             # Training/eval config YAMLs
+├── data/                       # Raw input (DICOM, XML)
+├── knowledge_graph/            # KG triples, embeddings, node2id/relation2id
+├── label attention model/      # Label attention model
+├── embeddings/                 # Generated embedding files (.npy, .json)
+├── checkpoints/                # Model weights
+├── outputs/                    # Labeled CSVs and evaluation logs
+├── ground_truths/              # JSONs with test-to-train relevance
+├── splited_data/               # Split datasets
+├── models/                     # Swin, BERT, Spacy, etc.
+├── src/                        # Core Python code
+└── config/                     # Training/eval config YAMLs
 ```
 
 ---

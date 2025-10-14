@@ -108,14 +108,26 @@ def unfreeze_backbone(backbones: Backbones):
     for p in backbones.parameters():
         p.requires_grad = True
 
-
 def unfreeze_last_stage(backbones: Backbones):
+    """
+    Unfreeze the last Swin stage (stage4/layer4) and all LayerNorms.
+    Keep earlier stages frozen for stability.
+    """
     for name, p in backbones.swin.named_parameters():
-        if "layers.3" in name or "layer4" in name or "blocks" in name and ("3" in name or "stage4" in name):
+        if (
+            "layers.3" in name
+            or "stage4" in name
+            or "layer4" in name
+            or "norm" in name  # unfreeze all normalization layers
+        ):
             p.requires_grad = True
         else:
             p.requires_grad = False
 
+    # Optional debug print
+    trainable = sum(p.numel() for p in backbones.swin.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in backbones.swin.parameters())
+    print(f"[DEBUG] Partial unfreeze: {trainable:,}/{total:,} params trainable ({trainable/total:.2%})")
 
 def train(
     cfg=None,
@@ -233,6 +245,8 @@ def train(
     best_score = -float("inf")
     best_epoch = -1
     out_path = Path(out_path or (MODEL_DIR / "finetuned_swin_labelaware.safetensors"))
+    patience = cfg.patience // 2
+    epochs_no_improve = 0
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -319,16 +333,40 @@ def train(
             "swin/epoch": epoch
         })
 
-        # Save best
+        # Save best or count non-improving epochs
         if composite > best_score:
             best_score = composite
             best_epoch = epoch
+            epochs_no_improve = 0
             try:
                 save_model(model, str(out_path))
                 print(f"[INFO] Saved best model checkpoint (safe) to {out_path} (epoch {epoch})")
             except Exception as e:
                 print(f"[ERROR] safetensors save_model failed: {e}")
                 raise
+
+            # Log best metrics to W&B summary
+            wandb.run.summary["best_epoch"] = epoch
+            wandb.run.summary["best_val_loss"] = val_loss
+            wandb.run.summary["best_f1_macro"] = macro_f1
+            wandb.run.summary["best_f1_micro"] = micro_f1
+            wandb.run.summary["best_precision_macro"] = macro_prec
+            wandb.run.summary["best_precision_micro"] = micro_prec
+            wandb.run.summary["best_recall_macro"] = macro_rec
+            wandb.run.summary["best_recall_micro"] = micro_rec
+            wandb.run.summary["best_ap_macro"] = macro_ap
+            wandb.run.summary["best_ap_micro"] = micro_ap
+            wandb.run.summary["best_auc_macro"] = macro_auc
+            wandb.run.summary["best_composite"] = composite
+
+        else:
+            epochs_no_improve += 1
+            print(f"[INFO] No improvement for {epochs_no_improve} epoch(s)")
+
+        # Early stopping condition
+        if epochs_no_improve >= patience:
+            print(f"[EARLY STOPPING] No improvement for {patience} epochs — stopping training early.")
+            break
 
     print(f"[DONE] Best composite score: {best_score:.4f} at epoch {best_epoch}")
     print(f"[INFO] Final best checkpoint written to {out_path}")

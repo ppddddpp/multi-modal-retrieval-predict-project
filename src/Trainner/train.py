@@ -302,7 +302,7 @@ if __name__ == '__main__':
     if not swin_ckpt_path.exists():
         print("Finetuning SWIN...")
         swin_finetune(
-            finetune_mode="full",
+            finetune_mode="partial",
             out_path=swin_ckpt_path
         )
     else:
@@ -529,7 +529,8 @@ if __name__ == '__main__':
     # --- Early stopping ---
     best_score = -float("inf")
     patience_counter = 0
-    
+    best_metrics = {}
+
     print("Starting training...")
     # --- Training Loop ---
     for epoch in range(EPOCHS):
@@ -680,9 +681,16 @@ if __name__ == '__main__':
             "val_rec_macro": macro_rec,
             "val_rec_micro": micro_rec,
             "val_accuracy": float(accuracy_score(y_true, y_bin)),
-            "epoch": epoch + 1
         }
-        wandb.log(val_metrics)
+        wandb.log({**val_metrics, "epoch": epoch + 1})
+
+        # update best metrics
+        for k, v in val_metrics.items():
+            key = k.replace("val/", "")
+            if not np.isnan(v) and v > best_metrics.get(key, -float("inf")):
+                best_metrics[key] = v
+                wandb.log({f"best/{key}": v, "best_epoch": epoch + 1})
+                print(f"New best {key}: {v:.4f} at epoch {epoch+1}")
 
         # save CSV for EDA
         df_eval = pd.DataFrame({'id': val_ids})
@@ -747,6 +755,12 @@ if __name__ == '__main__':
     torch.save(val_attns, ATTN_DIR / "val_last_attn_weights.npy")
     with open(EMBED_SAVE_PATH / "val_last_ids.json", "w") as f:
         json.dump(val_ids, f)
+
+    # --- Log all best metrics to W&B summary ---
+    for key, value in best_metrics.items():
+        wandb.run.summary[f"best_{key}"] = value
+    wandb.run.summary["best_composite"] = best_score
+    wandb.run.summary["best_epoch"] = epoch + 1
 
     print("Training complete.")
     print("Saving train joint embeddings...")

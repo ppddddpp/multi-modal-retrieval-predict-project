@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 from KnowledgeGraph.label_attention import LabelAttention
 import json
 import pandas as pd
@@ -20,6 +21,8 @@ from DataHandler.TripletGenerate import PseudoTripletDataset, LabelEmbeddingLook
 from KnowledgeGraph.kg_label_create import ensure_label_embeddings
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 from Helpers import Config
+import numpy as np
+from sklearn.metrics import average_precision_score
 try:
     BASE_DIR = Path(__file__).resolve().parent.parent.parent
 except NameError:
@@ -35,6 +38,98 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 MODEL_DIR = BASE_DIR / "label attention model"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+class LabelAttentionWithTemp(LabelAttention):
+    def __init__(self, d_emb, hidden=64):
+        super().__init__(d_emb=d_emb, hidden=hidden)
+        self.temperature = nn.Parameter(torch.tensor(0.07))
+
+class PseudoPairDataset(torch.utils.data.Dataset):
+    def __init__(self, df, min_overlap=0.5, max_overlap=0.2, mode="positive"):
+        self.df = df
+        self.samples = []
+        self.mode = mode
+        ids = list(df.index)
+        for i, id1 in enumerate(ids):
+            for j, id2 in enumerate(ids):
+                if i != j:
+                    labels1 = df.loc[id1].values
+                    labels2 = df.loc[id2].values
+                    overlap = (labels1 & labels2).sum() / (labels1 | labels2).sum()
+                    if mode == "positive" and overlap >= min_overlap:
+                        self.samples.append((id1, id2, 1))
+                    elif mode == "negative" and overlap <= max_overlap:
+                        self.samples.append((id1, id2, 0))
+
+    def _generate_pairs(self):
+        ids = list(self.df.index)
+        for i, id1 in enumerate(ids):
+            for j, id2 in enumerate(ids):
+                if i != j:
+                    # Overlap between label vectors
+                    labels1 = self.df.loc[id1].values
+                    labels2 = self.df.loc[id2].values
+                    overlap = (labels1 & labels2).sum() / (labels1 | labels2).sum()
+                    if overlap >= self.min_overlap:
+                        self.samples.append((id1, id2))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]   # (qid, pid, label)
+
+def info_nce_loss(q, p, temperature):
+    q = F.normalize(q, dim=1)
+    p = F.normalize(p, dim=1)
+    logits = q @ p.T / temperature
+    labels = torch.arange(q.size(0), device=q.device)
+    return F.cross_entropy(logits, labels)
+
+def contrastive_bce_loss(q, p, labels, temperature):
+    q = F.normalize(q, dim=1)
+    p = F.normalize(p, dim=1)
+    sims = (q * p).sum(dim=1) / temperature
+    return F.binary_cross_entropy_with_logits(sims, labels.float())
+
+@torch.no_grad()
+def evaluate_label_attention(model, label_lookup, df, device="cuda", topk=[1,5,10]):
+    model.eval()
+    ids = list(df.index)
+
+    # precompute embeddings
+    emb_dict = {}
+    for rid in ids:
+        emb = label_lookup.get_label_embs(rid).to(device)
+        mask = torch.ones((emb.shape[0],), dtype=torch.bool, device=device)
+        rep, _ = model(emb.unsqueeze(0), mask=mask.unsqueeze(0))
+        emb_dict[rid] = rep.squeeze(0).cpu().numpy()
+
+    all_embs = np.stack([emb_dict[r] for r in ids])
+    norms = np.linalg.norm(all_embs, axis=1, keepdims=True)
+    sims = all_embs @ all_embs.T / (norms @ norms.T)
+
+    recall_at_k, ap_scores = {k: [] for k in topk}, []
+    for i, qid in enumerate(ids):
+        q_labels = df.loc[qid].values
+        labels = np.array([(q_labels & df.loc[pid].values).sum() > 0 for pid in ids], dtype=int)
+        labels[i] = 0  # exclude self
+
+        sim_row = sims[i]
+        idx = np.argsort(-sim_row)
+        sorted_labels = labels[idx]
+
+        for k in topk:
+            recall_at_k[k].append(sorted_labels[:k].mean())
+        ap_scores.append(average_precision_score(labels, sim_row))
+
+    results = {f"recall@{k}": np.mean(v) for k, v in recall_at_k.items()}
+    results["mAP"] = np.mean(ap_scores)
+
+    print("\n[Eval] Retrieval performance:")
+    for k, v in results.items():
+        print(f"  {k}: {v:.4f}")
+    return results
+
 def train_label_attention(
     dataset,
     label_lookup,
@@ -48,60 +143,73 @@ def train_label_attention(
     device="cuda" if torch.cuda.is_available() else "cpu",
     log_to_wandb=False,
     val_dataset=None,
+    loss_type="infonce",
 ):
     """
-    Train a LabelAttention model.
+    Train a LabelAttention model with InfoNCE loss.
 
     Args:
-        dataset (torch.utils.data.Dataset): The dataset to train on.
-        label_lookup (LabelEmbeddingLookup): The label lookup object.
-        d_emb (int): The dimensionality of the embeddings.
-        hidden (int, optional): The number of hidden units in the model. Defaults to 64.
-        batch_size (int, optional): The batch size. Defaults to 32.
-        epochs (int, optional): The number of epochs to train for. Defaults to 20.
-        lr (float, optional): The learning rate. Defaults to 1e-3.
-        patience (int, optional): The patience for early stopping. Defaults to 3.
-        save_path (str, optional): The path to save the model to. Defaults to None, which means the model is saved to MODEL_DIR / "label_attention_model.pt".
-        device (str, optional): The device to use. Defaults to "cuda" if available, otherwise "cpu".
-        log_to_wandb (bool, optional): Whether to log to Weights and Biases. Defaults to False.
-        val_dataset (torch.utils.data.Dataset, optional): The validation dataset. Defaults to None.
+        dataset (torch.utils.data.Dataset): Yields (qid, pid) pairs.
+        label_lookup (LabelEmbeddingLookup): Lookup for label embeddings.
+        d_emb (int): Embedding dimensionality.
+        hidden (int): Hidden size of LabelAttention.
+        batch_size (int): Training batch size.
+        epochs (int): Number of epochs.
+        lr (float): Learning rate.
+        patience (int): Early stopping patience.
+        save_path (str): Path to save model.
+        device (str): Device ("cuda" or "cpu").
+        log_to_wandb (bool): Log to W&B.
+        val_dataset (torch.utils.data.Dataset): Validation dataset (same format as dataset).
 
     Returns:
-        LabelAttention: The trained model.
+        Trained LabelAttention model.
     """
+    # default save path
     if save_path is None:
+        BASE_DIR = Path(__file__).resolve().parent.parent.parent
+        MODEL_DIR = BASE_DIR / "label attention model"
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
         save_path = MODEL_DIR / "label_attention_model.pt"
 
-    model = LabelAttention(d_emb=d_emb, hidden=hidden).to(device)
+    # init model + optimizer
+    model = LabelAttentionWithTemp(d_emb=d_emb, hidden=hidden).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     best_loss = float("inf")
     patience_counter = 0
 
-    model.train()
+    # training loop
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
-        for batch in tqdm(loader, desc=f"LabelAttention Epoch {epoch}/{epochs}"):
-            qids, pids, nids = batch
-            batch_q, batch_p, batch_n = [], [], []
-            mask_q, mask_p, mask_n = [], [], []
 
-            for qid, pid, nid in zip(qids, pids, nids):
+        for batch in tqdm(loader, desc=f"LabelAttention Epoch {epoch}/{epochs}"):
+            if loss_type == "infonce":
+                qids, pids = batch
+                labels = None
+            elif loss_type == "bce":
+                qids, pids, labels = batch
+                labels = labels.to(device)
+
+            batch_q, batch_p, mask_q, mask_p = [], [], [], []
+
+            # collect embeddings for batch
+            for qid, pid in zip(qids, pids):
                 def get_and_mask(rid):
                     emb = label_lookup.get_label_embs(rid)  # [n_labels, d]
                     mask = torch.ones((emb.shape[0],), dtype=torch.bool)
                     return emb, mask
+
                 q_embs, q_mask = get_and_mask(qid)
                 p_embs, p_mask = get_and_mask(pid)
-                n_embs, n_mask = get_and_mask(nid)
+
                 batch_q.append(q_embs); mask_q.append(q_mask)
                 batch_p.append(p_embs); mask_p.append(p_mask)
-                batch_n.append(n_embs); mask_n.append(n_mask)
 
-            max_len = max(x.shape[0] for x in batch_q + batch_p + batch_n)
+            # pad sequences to max length
+            max_len = max(x.shape[0] for x in batch_q + batch_p)
 
             def pad_stack(tensors, masks):
                 emb_out, mask_out = [], []
@@ -118,74 +226,75 @@ def train_label_attention(
 
             q_batch, q_mask_batch = pad_stack(batch_q, mask_q)
             p_batch, p_mask_batch = pad_stack(batch_p, mask_p)
-            n_batch, n_mask_batch = pad_stack(batch_n, mask_n)
 
+            # forward + loss
             optimizer.zero_grad()
             q_rep, _ = model(q_batch, mask=q_mask_batch)
             p_rep, _ = model(p_batch, mask=p_mask_batch)
-            n_rep, _ = model(n_batch, mask=n_mask_batch)
 
-            loss = triplet_loss(q_rep, p_rep, n_rep)
+            if loss_type == "infonce":
+                loss = info_nce_loss(q_rep, p_rep, model.temperature)
+            elif loss_type == "bce":
+                loss = contrastive_bce_loss(q_rep, p_rep, labels, model.temperature)
+
+            # backward
             loss.backward()
             optimizer.step()
-
             total_loss += loss.item()
 
         avg_loss = total_loss / len(loader)
         print(f"Epoch {epoch}/{epochs}  Loss={avg_loss:.4f}")
 
+        # -----------------
+        # validation
+        # -----------------
         if val_dataset is not None:
             val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
             model.eval()
             val_loss = 0.0
             with torch.no_grad():
-                for qids, pids, nids in val_loader:
-                    batch_q, batch_p, batch_n = [], [], []
-                    mask_q, mask_p, mask_n = [], [], []
+                for batch in val_loader:
+                    if loss_type == "infonce":
+                        qids, pids = batch
+                        labels = None
+                    elif loss_type == "bce":
+                        qids, pids, labels = batch
+                        labels = labels.to(device)
 
-                    for qid, pid, nid in zip(qids, pids, nids):
+                    batch_q, batch_p, mask_q, mask_p = [], [], [], []
+                    for qid, pid in zip(qids, pids):
                         def get_and_mask(rid):
                             emb = label_lookup.get_label_embs(rid)
                             mask = torch.ones((emb.shape[0],), dtype=torch.bool)
                             return emb, mask
+
                         q_embs, q_mask = get_and_mask(qid)
                         p_embs, p_mask = get_and_mask(pid)
-                        n_embs, n_mask = get_and_mask(nid)
                         batch_q.append(q_embs); mask_q.append(q_mask)
                         batch_p.append(p_embs); mask_p.append(p_mask)
-                        batch_n.append(n_embs); mask_n.append(n_mask)
 
-                    max_len = max(x.shape[0] for x in batch_q + batch_p + batch_n)
-
-                    def pad_stack(tensors, masks):
-                        emb_out, mask_out = [], []
-                        for t, m in zip(tensors, masks):
-                            pad_len = max_len - t.shape[0]
-                            if pad_len > 0:
-                                pad_emb = torch.zeros((pad_len, t.shape[1]), device=device)
-                                pad_mask = torch.zeros((pad_len,), dtype=torch.bool)
-                                t = torch.cat([t, pad_emb], dim=0)
-                                m = torch.cat([m, pad_mask], dim=0)
-                            emb_out.append(t)
-                            mask_out.append(m)
-                        return torch.stack(emb_out).to(device), torch.stack(mask_out).to(device)
-
+                    max_len = max(x.shape[0] for x in batch_q + batch_p)
                     q_batch, q_mask_batch = pad_stack(batch_q, mask_q)
                     p_batch, p_mask_batch = pad_stack(batch_p, mask_p)
-                    n_batch, n_mask_batch = pad_stack(batch_n, mask_n)
 
                     q_rep, _ = model(q_batch, mask=q_mask_batch)
                     p_rep, _ = model(p_batch, mask=p_mask_batch)
-                    n_rep, _ = model(n_batch, mask=n_mask_batch)
 
-                    loss = triplet_loss(q_rep, p_rep, n_rep)
+                    if loss_type == "infonce":
+                        loss = info_nce_loss(q_rep, p_rep, model.temperature)
+                    elif loss_type == "bce":
+                        loss = contrastive_bce_loss(q_rep, p_rep, labels, model.temperature)
+
                     val_loss += loss.item()
 
             avg_val_loss = val_loss / len(val_loader)
             print(f"Validation Loss={avg_val_loss:.4f}")
-        
-        monitor_loss = avg_val_loss if val_dataset is not None else avg_loss
+        else:
+            avg_val_loss = avg_loss
 
+        # -----------------
+        # logging
+        # -----------------
         if log_to_wandb:
             wandb.log({
                 "la/train_loss": avg_loss,
@@ -193,6 +302,10 @@ def train_label_attention(
                 "epoch": epoch
             })
 
+        # -----------------
+        # early stopping
+        # -----------------
+        monitor_loss = avg_val_loss
         if monitor_loss < best_loss - 1e-3:
             best_loss = monitor_loss
             patience_counter = 0
@@ -221,8 +334,8 @@ def train_label_attention(
     if os.path.exists(save_path):
         checkpoint = torch.load(save_path, map_location=device)
         model.load_state_dict(checkpoint["model_state"])
-    return model
 
+    return model
 
 if __name__ == "__main__":
     combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
@@ -272,8 +385,8 @@ if __name__ == "__main__":
 
     if not (MODEL_LA_DIR / "label_attention_model.pt").exists():
         print("Training LabelAttention pooling...")
-        pseudo_dataset_train = PseudoTripletDataset(labels_df.loc[list(train_ids)], min_overlap=0.5)
-        pseudo_dataset_val   = PseudoTripletDataset(labels_df.loc[list(val_ids)],   min_overlap=0.5)
+        pseudo_dataset_train = PseudoPairDataset(labels_df.loc[list(train_ids)], min_overlap=0.5)
+        pseudo_dataset_val   = PseudoPairDataset(labels_df.loc[list(val_ids)],   min_overlap=0.5)
 
         try:
             print("Loading label embeddings...")

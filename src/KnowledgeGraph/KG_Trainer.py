@@ -514,6 +514,8 @@ class KGTrainer:
         # early stopping bookkeeping
         best_val = -float("inf")
         bad_epochs = 0
+        best_kg_metrics = {"mrr": -float("inf"), "hits1": -float("inf"), "hits10": -float("inf")}
+        best_epoch = -1
 
         neg_size = negative_size if negative_size > 0 else 32
         adv_temp = advance_temp if advance_temp > 0.0 else 1.0
@@ -721,16 +723,40 @@ class KGTrainer:
             # evaluate
             if hasattr(self, "val_triples") and len(self.val_triples) > 0:
                 try:
-                    mrr, hits1, hits10 = self.evaluate(self.val_triples, k=10, use_amp=use_amp, progress=progress_bar_for_eval)
+                    mrr, hits1, hits5, hits10 = self.evaluate(self.val_triples, k=10, use_amp=use_amp, progress=progress_bar_for_eval)
+
+                    # --- Track best metrics ---
+                    if mrr > best_kg_metrics["mrr"]:
+                        best_kg_metrics["mrr"] = mrr
+                        best_epoch = epoch + 1
+                        if log_to_wandb:
+                            wandb.log({"kg/best_mrr": mrr, "kg/best_mrr_epoch": best_epoch})
+
+                    if hits1 > best_kg_metrics["hits1"]:
+                        best_kg_metrics["hits1"] = hits1
+                        if log_to_wandb:
+                            wandb.log({"kg/best_hits1": hits1, "kg/best_hits1_epoch": epoch + 1})
+
+                    if hits5 > best_kg_metrics["hits5"]:
+                        best_kg_metrics["hits5"] = hits5
+                        if log_to_wandb:
+                            wandb.log({"kg/best_hits5": hits5, "kg/best_hits5_epoch": epoch + 1})
+
+                    if hits10 > best_kg_metrics["hits10"]:
+                        best_kg_metrics["hits10"] = hits10
+                        if log_to_wandb:
+                            wandb.log({"kg/best_hits10": hits10, "kg/best_hits10_epoch": epoch + 1})
+
                     print(f"[Eval] MRR={mrr:.4f}, Hits@1={hits1:.4f}, Hits@10={hits10:.4f}")
                     log_data.update({
                         "kg/val_mrr": mrr,
                         "kg/val_hits1": hits1,
+                        "kg/val_hits5": hits5,
                         "kg/val_hits10": hits10,
                     })
 
                     # early stopping
-                    val_score = {"mrr": mrr, "hits1": hits1, "hits10": hits10}[metric]
+                    val_score = {"mrr": mrr, "hits1": hits1, "hits5": hits5, "hits10": hits10}[metric]
                     if val_score > best_val:
                         best_val = val_score
                         bad_epochs = 0
@@ -761,11 +787,10 @@ class KGTrainer:
                 except Exception as e:
                     print(f"[WARN] save_embeddings failed: {e}")
 
-        if started_wandb and getattr(wandb, "run", None) is not None:
-            try:
-                wandb.finish()
-            except Exception as e:
-                print(f"[WARN] wandb.finish failed: {e}")
+        if log_to_wandb:
+            for k, v in best_kg_metrics.items():
+                wandb.run.summary[f"kg_best_{k}"] = v
+            wandb.run.summary["kg_best_epoch"] = best_epoch
 
     def probe_max_eval_batch(self,
                             s_batch: torch.Tensor,
@@ -1044,6 +1069,27 @@ class KGTrainer:
     def evaluate(self, triples: list, k: int = 10, triple_batch_size: int = 64,
                 cand_batch_size: Optional[int] = None, use_amp: Optional[bool] = None,
                 progress: bool = True):
+        """
+        Evaluate model on given triples.
+
+        Args:
+            triples: List of triples to evaluate (s, r, o, _, _)
+            k: int = 10, number of top scores to consider for ranking
+            triple_batch_size: int = 64, batch size for triples
+            cand_batch_size: Optional[int] = None, batch size for candidate entities
+            use_amp: Optional[bool] = None, whether to use AMP (auto mixed precision)
+            progress: bool = True, whether to show progress bar
+
+        Returns:
+            mrr: float, mean reciprocal rank
+            hits1: float, proportion of correct entities in top 1
+            hits5: float, proportion of correct entities in top 5
+            hits10: float, proportion of correct entities in top 10
+
+        Notes:
+            - If cand_batch_size is not set, it is automatically probed in the range [4096, 1 << 16]
+            - If use_amp is not set, it is automatically set to True if CUDA is available
+        """
         all_known = set((s, r, o) for s, r, o, _, _ in self.triples)
         self.model.eval()
         ranks = []
@@ -1143,14 +1189,15 @@ class KGTrainer:
         # --- compute metrics ---
         mrr = np.mean([1.0 / r for r in ranks]) if ranks else 0.0
         hits1 = np.mean([r <= 1 for r in ranks]) if ranks else 0.0
+        hits5 = np.mean([r <= 5 for r in ranks]) if ranks else 0.0
         hits10 = np.mean([r <= 10 for r in ranks]) if ranks else 0.0
 
         t_eval_total = time.time() - t_eval_start
         print(f"[KGTrainer] Evaluation finished in {t_eval_total:.1f}s — "
-            f"mrr={mrr:.4f}, hits1={hits1:.4f}, hits10={hits10:.4f}")
+            f"mrr={mrr:.4f}, hits1={hits1:.4f}, hits5={hits5:.4f}, hits10={hits10:.4f}")
 
         self.model.train()
-        return mrr, hits1, hits10
+        return mrr, hits1, hits5, hits10
 
     def save_embeddings(self, node_out: str = None, rel_out: str = None, suffix: str = ""):
         node_out = Path(node_out) if node_out else (self.kg_dir / f"node_embeddings{('_'+suffix) if suffix else ''}.npy")
