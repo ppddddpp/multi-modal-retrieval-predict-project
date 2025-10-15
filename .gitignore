@@ -218,6 +218,7 @@ cudaCheck.ipynb
 run.ipynb
 config-old
 wandb
+best
 upload
 embeddings
 checkpoints

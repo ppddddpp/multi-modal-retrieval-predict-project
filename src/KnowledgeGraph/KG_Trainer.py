@@ -514,7 +514,7 @@ class KGTrainer:
         # early stopping bookkeeping
         best_val = -float("inf")
         bad_epochs = 0
-        best_kg_metrics = {"mrr": -float("inf"), "hits1": -float("inf"), "hits10": -float("inf")}
+        best_kg_metrics = {"mrr": -float("inf"), "hits1": -float("inf"), "hits5": -float("inf"), "hits10": -float("inf")}
         best_epoch = -1
 
         neg_size = negative_size if negative_size > 0 else 32
@@ -791,6 +791,25 @@ class KGTrainer:
             for k, v in best_kg_metrics.items():
                 wandb.run.summary[f"kg_best_{k}"] = v
             wandb.run.summary["kg_best_epoch"] = best_epoch
+
+        # --- Save best metrics as JSON ---
+        best_path = BASE_DIR / "best"
+        if not best_path.exists():
+            best_path.mkdir(parents=True)
+        best_json_path = best_path / "best_metrics.json"
+        best_payload = {
+            "best_epoch": best_epoch,
+            "metric_used": metric,
+            "timestamp": datetime.datetime.now().isoformat(),
+        }
+        best_payload.update(best_kg_metrics)
+
+        try:
+            with best_json_path.open("w", encoding="utf8") as f:
+                json.dump(best_payload, f, indent=2)
+            print(f"[KGTrainer] Saved best metrics -> {best_json_path}")
+        except Exception as e:
+            print(f"[WARN] Failed to save best metrics JSON: {e}")
 
     def probe_max_eval_batch(self,
                             s_batch: torch.Tensor,

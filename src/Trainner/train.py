@@ -762,6 +762,26 @@ if __name__ == '__main__':
     wandb.run.summary["best_composite"] = best_score
     wandb.run.summary["best_epoch"] = epoch + 1
 
+    # --- Save best metrics as JSON ---
+    best_path = BASE_DIR / "best"
+    if not best_path.exists():
+        best_path.mkdir(parents=True)
+    best_json_path = best_path / "best_multimodal_metrics.json"
+    
+    best_payload = {
+        "best_epoch": epoch + 1,
+        "best_composite": best_score,
+        "timestamp": datetime.datetime.now().isoformat(),
+    }
+    best_payload.update(best_metrics)
+
+    try:
+        with best_json_path.open("w", encoding="utf8") as f:
+            json.dump(best_payload, f, indent=2)
+        print(f"[INFO] Saved best multimodal metrics -> {best_json_path}")
+    except Exception as e:
+        print(f"[WARN] Failed to save best metrics JSON: {e}")
+
     print("Training complete.")
     print("Saving train joint embeddings...")
 
@@ -775,5 +795,9 @@ if __name__ == '__main__':
 
     with open(EMBED_SAVE_PATH / "train_ids.json", "w") as f:
         json.dump(train_ids, f)
+
+    from train_label_attention import train as train_label_attention
+
+    train_label_attention()
 
     print("Done.")

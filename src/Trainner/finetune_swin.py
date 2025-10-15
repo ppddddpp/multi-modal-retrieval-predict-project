@@ -245,7 +245,7 @@ def train(
     best_score = -float("inf")
     best_epoch = -1
     out_path = Path(out_path or (MODEL_DIR / "finetuned_swin_labelaware.safetensors"))
-    patience = cfg.patience // 2
+    patience = cfg.patience
     epochs_no_improve = 0
 
     for epoch in range(1, epochs + 1):
@@ -367,6 +367,43 @@ def train(
         if epochs_no_improve >= patience:
             print(f"[EARLY STOPPING] No improvement for {patience} epochs — stopping training early.")
             break
+
+    # --- Save best finetune metrics as JSON ---
+    best_path = BASE_DIR / "best"
+    if not best_path.exists():
+        best_path.mkdir(parents=True)
+    best_json_path = best_path / "best_swin_finetune_metrics.json"
+
+    best_payload = {
+        "best_epoch": best_epoch,
+        "best_composite": best_score,
+        "best_checkpoint": str(out_path),
+        "metrics": {
+            "val_loss": wandb.run.summary.get("best_val_loss", None),
+            "f1_macro": wandb.run.summary.get("best_f1_macro", None),
+            "f1_micro": wandb.run.summary.get("best_f1_micro", None),
+            "precision_macro": wandb.run.summary.get("best_precision_macro", None),
+            "precision_micro": wandb.run.summary.get("best_precision_micro", None),
+            "recall_macro": wandb.run.summary.get("best_recall_macro", None),
+            "recall_micro": wandb.run.summary.get("best_recall_micro", None),
+            "ap_macro": wandb.run.summary.get("best_ap_macro", None),
+            "ap_micro": wandb.run.summary.get("best_ap_micro", None),
+            "auc_macro": wandb.run.summary.get("best_auc_macro", None),
+        },
+        "wandb_run": {
+            "name": wandb.run.name if wandb.run else None,
+            "id": wandb.run.id if wandb.run else None,
+            "project": wandb.run.project if wandb.run else None,
+        }
+    }
+
+    try:
+        with open(best_json_path, "w", encoding="utf8") as f:
+            json.dump(best_payload, f, indent=2)
+        print(f"[INFO] Saved best Swin finetune metrics -> {best_json_path}")
+    except Exception as e:
+        print(f"[WARN] Could not save best Swin finetune metrics: {e}")
+
 
     print(f"[DONE] Best composite score: {best_score:.4f} at epoch {best_epoch}")
     print(f"[INFO] Final best checkpoint written to {out_path}")

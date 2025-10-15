@@ -390,7 +390,7 @@ def train_label_attention(
 
     return model
 
-if __name__ == "__main__":
+def train():
     combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
     cfg = Config.load(CONFIG_DIR / 'config.yaml')
 
@@ -473,3 +473,45 @@ if __name__ == "__main__":
         )
     else:
         print("Using cached LabelAttention model")
+
+    # --- Evaluate on validation set after training ---
+    print("\n[INFO] Evaluating best LabelAttention model on validation set...")
+    eval_results = evaluate_label_attention(model_attn, label_lookup, labels_df.loc[list(val_ids)], device="cuda")
+
+    # --- Save all results to JSON ---
+    best_path = BASE_DIR / "best"
+    if not best_path.exists():
+        best_path.mkdir(parents=True)
+    best_json_path = best_path / "best_label_attention_metrics.json"
+
+    best_payload = {
+        "model_path": str(MODEL_LA_DIR / "label_attention_model.pt"),
+        "best_val_loss": float(wandb.run.summary.get("la/best_loss", 0.0)) if wandb.run else None,
+        "config": {
+            "epochs": cfg.la_epochs,
+            "batch_size": cfg.la_batch_size,
+            "lr": cfg.la_lr,
+            "patience": cfg.la_patience,
+            "hidden_dim": cfg.la_hidden_dim,
+            "la_ice_weight": cfg.la_ice_weight,
+            "la_tpl_weight": cfg.la_tpl_weight,
+            "la_bce_weight": cfg.la_bce_weight,
+        },
+        "eval_metrics": eval_results,  # recall@k and mAP
+        "wandb_run": {
+            "name": wandb.run.name if wandb.run else None,
+            "id": wandb.run.id if wandb.run else None,
+            "project": wandb.run.project if wandb.run else None,
+        }
+    }
+
+    try:
+        best_json_path.parent.mkdir(exist_ok=True)
+        with open(best_json_path, "w", encoding="utf8") as f:
+            json.dump(best_payload, f, indent=2)
+        print(f"[INFO] Saved best LabelAttention metrics -> {best_json_path}")
+    except Exception as e:
+        print(f"[WARN] Could not save best LabelAttention metrics: {e}")
+
+if __name__ == "__main__":
+    train()

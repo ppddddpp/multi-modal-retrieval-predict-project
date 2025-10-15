@@ -10,6 +10,54 @@ import json
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 EMBEDDINGS_DIR = BASE_DIR / "embeddings"
 
+class MiniSwinBlock(nn.Module):
+    def __init__(self, dim, num_heads=8, window_size=7):
+        super().__init__()
+        self.window_size = window_size
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, 4*dim),
+            nn.GELU(),
+            nn.Linear(4*dim, dim)
+        )
+
+    def forward(self, x):
+        # x: (B, L, D)
+        B, L, D = x.shape
+        ws = self.window_size
+
+        # reshape to (B, num_windows, ws, D)
+        num_windows = L // ws
+        x = x[:, :num_windows*ws, :].reshape(B*num_windows, ws, D)
+
+        # window attention
+        attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
+        x = x + attn_out
+        x = x + self.mlp(self.norm2(x))
+
+        # merge back
+        x = x.reshape(B, num_windows*ws, D)
+        return x
+
+class GlobalAttentionBlock(nn.Module):
+    def __init__(self, dim, num_heads=8):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, 4 * dim),
+            nn.GELU(),
+            nn.Linear(4 * dim, dim)
+        )
+    def forward(self, x):
+        attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
+        x = x + attn_out
+        x = x + self.ffn(self.norm2(x))
+        return x
+
 class MultiHeadMLP(nn.Module):
     def __init__(self, dim, num_heads):
         super().__init__()
@@ -159,6 +207,22 @@ class MultiModalRetrievalModel(nn.Module):
         else:
             raise ValueError(f"Unknown model_type {model_type!r}")
 
+        # Image attention boosters
+        if model_type == "image":
+            self.img_proj = nn.Linear(img_dim, joint_dim)
+            self.global_layers = nn.ModuleList([
+                GlobalAttentionBlock(joint_dim, num_heads=8) for _ in range(2)
+            ])
+            self.swin_layers = nn.ModuleList([
+                MiniSwinBlock(joint_dim, num_heads=8, window_size=7)
+            ])
+
+        if model_type == "multimodal":
+            self.image_enhancer = nn.Sequential(
+                GlobalAttentionBlock(joint_dim, num_heads=8),
+                MiniSwinBlock(joint_dim, num_heads=8, window_size=7)
+            )
+
         # set up fusion
         if fusion_type == "cross":
             self.fusion_layers = nn.ModuleList([
@@ -296,6 +360,14 @@ class MultiModalRetrievalModel(nn.Module):
             attention_mask.to(self.device) if attention_mask is not None else None
         )
 
+        # Image enhancement
+        p = self.img_proj(img_patches)
+        g = self.img_proj(img_global)
+        seq = torch.cat([g.unsqueeze(1), p], dim=1)
+        seq = self.image_enhancer(seq)
+        img_global = seq[:, 0, :]          # use global token
+        img_patches = seq[:, 1:, :]
+
         img_emb = self.img_proj(img_global) if img_global is not None else None
         if txt_feats is not None:
             if self.use_cls_only:
@@ -394,10 +466,20 @@ class MultiModalRetrievalModel(nn.Module):
 
         # --- Image-only ---
         elif self.model_type == "image":
-            x = img_global  # (B, D_img)
-            x = self.img_proj(x)  # nn.Linear(img_dim, joint_dim)
-            x = self.shared_ffn(x) if self.use_shared_ffn else self.ffn[0](x)
-            joint_emb = x
+            g = self.img_proj(img_global)
+            p = self.img_proj(img_patches)
+            seq = torch.cat([g.unsqueeze(1), p], dim=1)
+
+            # Global attention first
+            for blk in self.global_layers:
+                seq = blk(seq)
+
+            # Local refinement (MiniSwin)
+            for blk in self.swin_layers:
+                seq = blk(seq)
+
+            pooled = seq.mean(dim=1)
+            joint_emb = self.shared_ffn(pooled) if self.use_shared_ffn else self.ffn[0](pooled)
 
         # --- Text-only ---
         elif self.model_type == "text":
