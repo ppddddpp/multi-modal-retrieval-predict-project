@@ -20,10 +20,12 @@ from Model import Backbones
 from Model import SwinModelForFinetune
 from Helpers import Config
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 from sklearn.metrics import (
     f1_score, precision_score, recall_score,
-    average_precision_score, roc_auc_score
+    average_precision_score, roc_auc_score,
+    precision_recall_curve
 )
 
 # Paths
@@ -34,6 +36,58 @@ SPLIT_DIR = BASE_DIR / "splited_data"
 OUTPUT_DIR = MODEL_DIR
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+class FocalBCEWithLogits(nn.Module):
+    """
+    Multi-label focal binary cross-entropy on logits.
+    alpha: None | tensor(shape=[L]) or scalar. If provided, it's weight for positives.
+    gamma: focusing parameter.
+    """
+    def __init__(self, alpha=None, gamma=2.0, reduction="mean"):
+        super().__init__()
+        if alpha is not None and not torch.is_tensor(alpha):
+            alpha = torch.tensor(alpha, dtype=torch.float32)
+        self.alpha = alpha
+        self.gamma = float(gamma)
+        self.reduction = reduction
+
+    def forward(self, logits, targets):
+        # logits: (B, L), targets: same shape (0/1 floats)
+        prob = torch.sigmoid(logits)
+        ce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction="none")  # (B,L)
+        p_t = prob * targets + (1 - prob) * (1 - targets)  # (B,L)
+        mod = (1 - p_t) ** self.gamma
+        loss = mod * ce
+        if self.alpha is not None:
+            alpha_pos = self.alpha.to(logits.device)
+            alpha_t = alpha_pos * targets + (1 - alpha_pos) * (1 - targets)
+            loss = alpha_t * loss
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        return loss
+
+def make_multilabel_sampler(records):
+    """
+    records: list of dicts, each record has 'labels' as list/array of 0/1 for L classes.
+    returns: WeightedRandomSampler instance
+    """
+    labels = np.array([r['labels'] for r in records], dtype=np.float32)  # shape (N, L)
+    class_counts = labels.sum(axis=0)  # shape (L,)
+    N, L = labels.shape
+    eps = 1e-6
+
+    # avoid division by zero
+    class_counts_safe = np.where(class_counts > 0, class_counts, N)
+    class_weights = (N / (class_counts_safe + eps)).astype(np.float32)  # shape (L,)
+
+    # sample weights
+    sample_weights = labels.dot(class_weights)  # shape (N,)
+    sample_weights = np.where(sample_weights > 0, sample_weights, np.min(sample_weights[sample_weights>0]) if np.any(sample_weights>0) else 1.0)
+
+    return WeightedRandomSampler(weights=torch.from_numpy(sample_weights),
+                                    num_samples=len(sample_weights),
+                                    replacement=True)
 
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -139,7 +193,8 @@ def train(
     lr=None,
     weight_decay=1e-2,
     device=None,
-    augment=True
+    augment=True,
+    use_focal = True
 ):
     """
     Finetune Swin model with given config and records.
@@ -155,7 +210,7 @@ def train(
         weight_decay (float): Weight decay for Adam optimizer.
         device (str): Device to use (e.g. "cuda", "cpu").
         augment (bool): Whether to use data augmentation for training.
-
+        use_focal (bool): Whether to use focal loss
     Returns:
         None
 
@@ -189,20 +244,67 @@ def train(
     )
     print(f"[INFO] train records: {len(train_records)}, val records: {len(val_records)}, labels: {len(label_cols)}")
 
-    train_loader = build_dataloader(train_records, batch_size=batch_size, mean=0.5, std=0.25,
-                                    augment=augment, max_length=cfg.text_dim)
-    val_loader = build_dataloader(val_records, batch_size=batch_size, mean=0.5, std=0.25,
-                                    augment=False, max_length=cfg.text_dim)
+    imagenet_mean = [0.485, 0.456, 0.406]
+    imagenet_std  = [0.229, 0.224, 0.225]
+
+    # create weighted sampler for the training records
+    sampler = make_multilabel_sampler(train_records)
+
+    # build dataloaders
+    train_loader = build_dataloader(
+        train_records,
+        batch_size=batch_size,
+        mean=imagenet_mean,
+        std=imagenet_std,
+        augment=augment,
+        max_length=cfg.text_dim,
+        sampler=sampler,
+    )
+
+    # build validation dataloader
+    val_loader = build_dataloader(
+        val_records,
+        batch_size=batch_size,
+        mean=imagenet_mean,
+        std=imagenet_std,
+        augment=False,
+        max_length=cfg.text_dim
+    )
+
+    # Print loader batch info (you already do some of these)
+    batch = next(iter(train_loader))
+    imgs = batch['image']
+    labels = batch['labels']
+    print("imgs.shape", imgs.shape)              # should be [B, 3, H, W]
+    print("imgs.dtype", imgs.dtype)
+    print("imgs.min/max", float(imgs.min()), float(imgs.max()))
+    print("imgs.mean/std", float(imgs.mean()), float(imgs.std()))
+    print("labels.shape", labels.shape)
+    print("labels.min/max", labels.min(), labels.max())
+    print("labels.dtype", labels.dtype)
+
+    # Confirm label values are float 0/1
+    labels = labels.float()
+    print("labels unique counts:", torch.unique(labels, return_counts=True))
 
     # Compute pos_weight
     label_counts = np.array([r['labels'] for r in train_records]).sum(axis=0)
     num_samples = len(train_records)
     label_counts = torch.tensor(label_counts, dtype=torch.float32)
-    pos_weight = ((num_samples - label_counts).clamp(min=1.0) / label_counts.clamp(min=1.0))
-    pos_weight = torch.log1p(pos_weight)  # smooth scaling
+    pos_weight = ((num_samples - label_counts) / (label_counts + 1e-9))
+    pos_weight = pos_weight.clamp(min=1.0, max=5.0)  # clamp to avoid extreme values
     pos_weight = pos_weight.to(device)
 
     print("[DEBUG] pos_weight stats:", pos_weight.min().item(), pos_weight.max().item())
+
+    label_freq = (label_counts / float(num_samples)).clamp(min=1e-6)  # tensor len L, on CPU or device?
+    # invert and normalize into [0,1]
+    inv = 1.0 / label_freq
+    alpha_pos = 0.5 + 0.5 * (inv / inv.max())   # maps to [0.5, 1.0]
+    alpha_pos = alpha_pos.clamp(0.01, 0.99).to(device)
+    alpha_pos = alpha_pos.to(device)  # move to device for loss later
+    gamma = 2.0  # experiment with 1.0..3.0
+    print(f"[DEBUG] focal alpha_pos sample (first 10): {alpha_pos[:10].tolist()}, gamma={gamma}")
 
     # Instantiate backbone
     backbones = Backbones(
@@ -211,6 +313,20 @@ def train(
         bert_local_dir=None,
         pretrained=True
     ).to(device)
+
+    # Confirm swin checkpoint
+    swin_path = Path(swin_init_ckpt) if swin_init_ckpt else (MODEL_DIR / "swin_checkpoint.safetensors")
+    try:
+        exists = swin_path.exists()
+    except Exception:
+        exists = False
+    print(f"[DIAG] Swin checkpoint argument (swin_init_ckpt): {swin_init_ckpt}")
+    print(f"[DIAG] Resolved swin_path: {swin_path} (exists={exists})")
+
+    # Print backbone summary: total params and trainable params
+    total_params = sum(p.numel() for p in backbones.parameters())
+    trainable_params = sum(p.numel() for p in backbones.parameters() if p.requires_grad)
+    print(f"[DIAG] Backbone params: {trainable_params:,}/{total_params:,} trainable ({trainable_params/total_params:.2%})")
 
     # Finetune config
     if finetune_mode == "frozen":
@@ -227,6 +343,29 @@ def train(
 
     model = SwinModelForFinetune(backbones=backbones, num_classes=len(label_cols)).to(device)
 
+    # Report actual trainable params after applying freeze/unfreeze
+    total_params = sum(p.numel() for p in backbones.parameters())
+    trainable_params = sum(p.numel() for p in backbones.parameters() if p.requires_grad)
+    print(f"[DIAG] After freeze/unfreeze: Backbone params: {trainable_params:,}/{total_params:,} trainable ({trainable_params/total_params:.2%})")
+
+    # Check model output shape on a batch
+    model.eval()
+    with torch.no_grad():
+        logits, _, _ = model(imgs.to(device))
+    print("logits.shape", logits.shape)          # should be [B, num_classes]
+    print("logits mean/min/max/std (cpu)", logits.detach().cpu().numpy().mean(),
+                                            logits.detach().cpu().numpy().min(),
+                                            logits.detach().cpu().numpy().max(),
+                                            logits.detach().cpu().numpy().std())
+
+    batch = next(iter(train_loader))
+    print("sampled batch label sums:", batch['labels'].sum(dim=0)[:30].tolist())
+
+    train_labels = np.array([r['labels'] for r in train_records])
+    val_labels = np.array([r['labels'] for r in val_records])
+    print("train prevalence (first 20):", train_labels.sum(axis=0) / len(train_labels))
+    print("val prevalence (first 20):", val_labels.sum(axis=0) / len(val_labels))
+
     # Separate params
     backbone_params = [p for _, p in backbones.named_parameters() if p.requires_grad]
     backbone_param_ids = {id(p) for p in backbone_params}
@@ -240,7 +379,12 @@ def train(
 
     optimizer = optim.AdamW(param_groups, lr=lr, weight_decay=weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    
+    if use_focal:
+        # pass alpha_pos as positive-class weighting into focal loss
+        criterion = FocalBCEWithLogits(alpha=alpha_pos, gamma=gamma, reduction="mean")
+    else:
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     best_score = -float("inf")
     best_epoch = -1
@@ -248,19 +392,48 @@ def train(
     patience = cfg.patience
     epochs_no_improve = 0
 
+
+    # run a quick overfit test on 1 batch (temp code)
+    model.train()
+    batch = next(iter(train_loader))
+    imgs = batch["image"].to(device)
+    labels = batch["labels"].to(device)
+    tmp_opt = optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=weight_decay)
+    for i in range(20):
+        tmp_opt.zero_grad()
+        logits, _, _ = model(imgs)
+        loss = criterion(logits, labels)
+
+        logits_np = logits.detach().cpu().numpy()
+        print("logits mean/min/max/std:", logits_np.mean(), logits_np.min(), logits_np.max(), logits_np.std())
+
+        loss.backward()
+        tmp_opt.step()
+        if i % 5 == 0:
+            print(f"[OVERFIT] step {i}, loss={loss.item():.6f}")
+
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
         pbar = tqdm(train_loader, desc=f"Finetuning Swin Epoch {epoch}/{epochs}")
         for batch in pbar:
             imgs = batch["image"].to(device)
-            labels = batch["labels"].to(device)
+            labels = batch["labels"].to(device).float()
 
             optimizer.zero_grad()
             logits, _, _ = model(imgs)
             loss = criterion(logits, labels)
 
             loss.backward()
+
+            # after backward and before optimizer.step
+            head_grad_sum = 0.0
+            for p in head_params:
+                if p.grad is not None:
+                    head_grad_sum += float(p.grad.abs().sum().cpu())
+            print("head_grad_sum:", head_grad_sum)
+
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
@@ -271,23 +444,72 @@ def train(
 
         # Validation
         model.eval()
-        val_loss, all_probs, all_labels = 0.0, [], []
+        val_loss, all_logits, all_labels = 0.0, [], []
+
         with torch.no_grad():
             for batch in tqdm(val_loader, desc="Validate"):
                 imgs = batch["image"].to(device)
-                labels = batch["labels"].to(device)
+                labels = batch["labels"].to(device).float()
                 logits, _, _ = model(imgs)
                 loss = criterion(logits, labels)
                 val_loss += loss.item() * imgs.size(0)
-                all_probs.append(torch.sigmoid(logits).cpu().numpy())
+                all_logits.append(logits.cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
 
         val_loss /= len(val_loader.dataset)
-        all_probs = np.vstack(all_probs)
+        all_logits = np.vstack(all_logits)
         all_labels = np.vstack(all_labels)
-        y_bin = (all_probs > 0.5).astype(int)
 
-        # Metrics
+        # ----- Temperature scaling -----
+        try:
+            logits_tensor = torch.from_numpy(all_logits).float().to(device)
+            labels_tensor = torch.from_numpy(all_labels).float().to(device)
+
+            log_T = torch.nn.Parameter(torch.tensor(0.0, device=device))
+            optimizer_T = optim.LBFGS([log_T], lr=1.0, max_iter=50, line_search_fn="strong_wolfe")
+
+            def _closure():
+                optimizer_T.zero_grad()
+                T = torch.exp(log_T)
+                loss_T = nn.functional.binary_cross_entropy_with_logits(
+                    logits_tensor / T, labels_tensor
+                )
+                loss_T.backward()
+                return loss_T
+
+            optimizer_T.step(_closure)
+            T_val = float(torch.exp(log_T).detach().cpu().item())
+            print(f"[INFO] Calibrated temperature: {T_val:.4f}")
+        except Exception as e:
+            print(f"[WARN] Temperature scaling failed: {e}")
+            T_val = 1.0
+
+        # ----- Apply temperature & compute calibrated probabilities -----
+        calibrated_probs = torch.sigmoid(
+            torch.from_numpy(all_logits).float().to(device) / max(T_val, 1e-6)
+        ).cpu().numpy()
+
+        np.save(MODEL_DIR / "last_val_temperature.npy", np.array([T_val], dtype=float))
+
+        # ----- Metrics -----
+        probs = calibrated_probs  # use calibrated version here
+        y_bin = (probs > 0.5).astype(int)
+
+        best_thr = np.zeros(probs.shape[1], dtype=float)
+        for c in range(probs.shape[1]):
+            try:
+                p, r, t = precision_recall_curve(all_labels[:, c], probs[:, c])
+                f1s = 2 * p * r / (p + r + 1e-12)
+                if f1s.size > 0:
+                    idx = np.nanargmax(f1s)
+                    best_thr[c] = float(t[idx]) if idx < len(t) else 0.5
+                else:
+                    best_thr[c] = 0.5
+            except Exception:
+                best_thr[c] = 0.5
+
+        np.save(MODEL_DIR / "last_val_best_thresholds.npy", best_thr)
+
         macro_f1 = f1_score(all_labels, y_bin, average='macro', zero_division=0)
         micro_f1 = f1_score(all_labels, y_bin, average='micro', zero_division=0)
         macro_prec = precision_score(all_labels, y_bin, average='macro', zero_division=0)
@@ -296,17 +518,17 @@ def train(
         micro_rec = recall_score(all_labels, y_bin, average='micro', zero_division=0)
 
         try:
-            macro_ap = average_precision_score(all_labels, all_probs, average='macro')
-            micro_ap = average_precision_score(all_labels, all_probs, average='micro')
+            macro_ap = average_precision_score(all_labels, probs, average='macro')
+            micro_ap = average_precision_score(all_labels, probs, average='micro')
         except Exception:
             macro_ap, micro_ap = np.nan, np.nan
 
         try:
-            macro_auc = roc_auc_score(all_labels, all_probs, average='macro')
+            macro_auc = roc_auc_score(all_labels, probs, average='macro')
         except Exception:
             macro_auc = np.nan
 
-        composite = 0.3*macro_f1 + 0.7*macro_auc
+        composite = 0.3 * macro_f1 + 0.7 * macro_auc
 
         print(
             f"[E{epoch}] train_loss={epoch_train_loss:.4f} | val_loss={val_loss:.4f} | "
@@ -332,7 +554,7 @@ def train(
             "swin/composite": composite,
             "swin/epoch": epoch
         })
-
+        
         # Save best or count non-improving epochs
         if composite > best_score:
             best_score = composite
@@ -344,7 +566,7 @@ def train(
             except Exception as e:
                 print(f"[ERROR] safetensors save_model failed: {e}")
                 raise
-
+            
             # Log best metrics to W&B summary
             wandb.run.summary["best_epoch"] = epoch
             wandb.run.summary["best_val_loss"] = val_loss
@@ -358,7 +580,7 @@ def train(
             wandb.run.summary["best_ap_micro"] = micro_ap
             wandb.run.summary["best_auc_macro"] = macro_auc
             wandb.run.summary["best_composite"] = composite
-
+            
         else:
             epochs_no_improve += 1
             print(f"[INFO] No improvement for {epochs_no_improve} epoch(s)")
@@ -367,7 +589,8 @@ def train(
         if epochs_no_improve >= patience:
             print(f"[EARLY STOPPING] No improvement for {patience} epochs — stopping training early.")
             break
-
+    
+    """
     # --- Save best finetune metrics as JSON ---
     best_path = BASE_DIR / "best"
     if not best_path.exists():
@@ -404,6 +627,13 @@ def train(
     except Exception as e:
         print(f"[WARN] Could not save best Swin finetune metrics: {e}")
 
+    """
+    
 
     print(f"[DONE] Best composite score: {best_score:.4f} at epoch {best_epoch}")
     print(f"[INFO] Final best checkpoint written to {out_path}")
+
+
+if __name__ == "__main__":
+    train(epochs=3, finetune_mode="frozen",  lr=1e-4,
+            swin_init_ckpt=str(MODEL_DIR / "finetuned_swin_labelaware.safetensors"))

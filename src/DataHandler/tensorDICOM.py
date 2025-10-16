@@ -14,8 +14,23 @@ class DICOMImagePreprocessor:
     def __init__(self, mean=0.5, std=0.5,
                     default_window_center=40.0, default_window_width=400.0,
                     output_size=(224, 224), augment=False):
-        self.mean = mean
-        self.std = std
+        
+        if isinstance(mean, (list, tuple, np.ndarray)):
+            if len(mean) != 3:
+                raise ValueError("mean must be scalar or length-3 iterable")
+            mean3 = [float(x) for x in mean]
+        else:
+            mean3 = [float(mean)] * 3
+
+        if isinstance(std, (list, tuple, np.ndarray)):
+            if len(std) != 3:
+                raise ValueError("std must be scalar or length-3 iterable")
+            std3 = [float(x) for x in std]
+        else:
+            std3 = [float(std)] * 3
+
+        self.mean = mean3
+        self.std = std3
         self.default_center = default_window_center
         self.default_width = default_window_width
         # Define torchvision pipeline
@@ -30,7 +45,7 @@ class DICOMImagePreprocessor:
             ]
         ops += [
             transforms.ToTensor(),
-            transforms.Normalize([mean, mean, mean], [std, std, std])
+            transforms.Normalize(mean3, std3)
         ]
         self.transform = transforms.Compose(ops)
 
@@ -78,11 +93,6 @@ class DICOMImagePreprocessor:
 
         # Rescale
         slope     = float(getattr(dcm, 'RescaleSlope', 1.0))
-        intercept = float(getattr(dcm, 'RescaleIntercept', 0.0))
-        scaled = raw * slope + intercept
-
-        # Rescale
-        slope = float(getattr(dcm, 'RescaleSlope', 1.0))
         intercept = float(getattr(dcm, 'RescaleIntercept', 0.0))
         scaled = raw * slope + intercept
 
@@ -140,6 +150,9 @@ class DICOMImagePreprocessor:
         img_3c = np.stack([windowed, windowed, windowed], axis=-1)  # (H, W, 3)
         pil = Image.fromarray((img_3c * 255).astype(np.uint8))
         
+        if pil.mode != "RGB":
+            pil = pil.convert("RGB")
+
         # apply torchvision transforms
         tensor = self.transform(pil) 
         return tensor

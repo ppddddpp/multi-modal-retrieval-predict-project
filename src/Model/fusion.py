@@ -79,6 +79,12 @@ class Backbones(nn.Module):
         if img_backbone == "swin":
             self.vision = timm.create_model(swin_model_name, pretrained=False, in_chans=self.swin_channel)
             if pretrained and swin_checkpoint_path:
+
+                if Path(swin_checkpoint_path).exists():
+                    print(f"[INFO] Loading Swin weights from: {swin_checkpoint_path}")
+                else:
+                    print(f"[WARN] Swin checkpoint not found at: {swin_checkpoint_path}")
+
                 try:
                     state = load_safetensor(str(swin_checkpoint_path), device="cpu")
                     # collapse patch-embed weights
@@ -88,6 +94,8 @@ class Backbones(nn.Module):
                         state["patch_embed.proj.weight"] = w1
                     filtered = {k: v for k, v in state.items() if k in self.vision.state_dict()}
                     self.vision.load_state_dict(filtered, strict=False)
+                    print("[INFO] Successfully loaded Swin weights")
+                    
                 except Exception as e:
                     print("[WARN] Failed to load Swin checkpoint:", e)
                     print("[INFO] Attempting to download pretrained Swin weights...")

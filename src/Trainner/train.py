@@ -428,11 +428,14 @@ if __name__ == '__main__':
         replacement=True
     )
 
+    imagenet_mean = [0.485, 0.456, 0.406]
+    imagenet_std  = [0.229, 0.224, 0.225]
+
     # --- Dataloaders ---
     train_loader = build_dataloader(
         train_records,
         batch_size=BATCH_SIZE,
-        mean=0.5, std=0.25,
+        mean=imagenet_mean, std=imagenet_std,
         sampler=sampler,
         max_length=text_dim
     )
@@ -440,7 +443,7 @@ if __name__ == '__main__':
     val_loader = build_dataloader(
         val_records,
         batch_size=BATCH_SIZE,
-        mean=0.5, std=0.25,
+        mean=imagenet_mean, std=imagenet_std,
         max_length=text_dim
     )
 
