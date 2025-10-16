@@ -590,7 +590,6 @@ def train(
             print(f"[EARLY STOPPING] No improvement for {patience} epochs — stopping training early.")
             break
     
-    """
     # --- Save best finetune metrics as JSON ---
     best_path = BASE_DIR / "best"
     if not best_path.exists():
@@ -626,8 +625,6 @@ def train(
         print(f"[INFO] Saved best Swin finetune metrics -> {best_json_path}")
     except Exception as e:
         print(f"[WARN] Could not save best Swin finetune metrics: {e}")
-
-    """
     
 
     print(f"[DONE] Best composite score: {best_score:.4f} at epoch {best_epoch}")
