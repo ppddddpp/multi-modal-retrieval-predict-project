@@ -492,7 +492,8 @@ if __name__ == '__main__':
         device=device,
         use_shared_ffn=cfg.use_shared_ffn,
         use_cls_only=cfg.use_cls_only,
-        training=True
+        training=True,
+        model_type="image"
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)

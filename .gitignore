@@ -190,6 +190,7 @@ models
 mapped
 eda_data
 z_old_result
+z_backup
 knowledge_graph
 check_run
 splited_data

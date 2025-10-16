@@ -40,7 +40,7 @@ def get_device():
 
 
 def build_finetune_subset(xml_dir, dicom_root, combined_groups, split_dir,
-                          finetune_ratio=0.4, train_ratio=0.75, seed=42, max_retry=20):
+                            finetune_ratio=0.4, train_ratio=0.75, seed=42, max_retry=20):
     """
     Build a balanced finetune subset:
         - Start from TRAIN SPLIT ONLY (no leakage from val/test).
@@ -95,7 +95,7 @@ def build_finetune_subset(xml_dir, dicom_root, combined_groups, split_dir,
         print(f"[WARN] Could not perfectly balance after {max_retry} attempts; continuing with last split.")
 
     print(f"[INFO] Finetune subset built: total_train={len(train_records_full)}, "
-          f"subset={len(subset_records)} (train={len(ft_train_records)}, val={len(ft_val_records)})")
+            f"subset={len(subset_records)} (train={len(ft_train_records)}, val={len(ft_val_records)})")
 
     return ft_train_records, ft_val_records, label_cols
 
@@ -174,8 +174,8 @@ def train(
     combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
     cfg = Config.load(CONFIG_DIR / 'config.yaml') if cfg is None else cfg
 
-    epochs = cfg.epochs
-    batch_size = cfg.batch_size
+    epochs = cfg.epochs if epochs is None else epochs
+    batch_size = cfg.batch_size if batch_size is None else batch_size
     lr = 1e-4 if lr is None else lr
 
     # Prepare records
@@ -192,7 +192,7 @@ def train(
     train_loader = build_dataloader(train_records, batch_size=batch_size, mean=0.5, std=0.25,
                                     augment=augment, max_length=cfg.text_dim)
     val_loader = build_dataloader(val_records, batch_size=batch_size, mean=0.5, std=0.25,
-                                  augment=False, max_length=cfg.text_dim)
+                                    augment=False, max_length=cfg.text_dim)
 
     # Compute pos_weight
     label_counts = np.array([r['labels'] for r in train_records]).sum(axis=0)

@@ -206,22 +206,14 @@ class MultiModalRetrievalModel(nn.Module):
             self.model_type = model_type
         else:
             raise ValueError(f"Unknown model_type {model_type!r}")
-
-        # Image attention boosters
-        if model_type == "image":
-            self.img_proj = nn.Linear(img_dim, joint_dim)
-            self.global_layers = nn.ModuleList([
-                GlobalAttentionBlock(joint_dim, num_heads=8) for _ in range(2)
-            ])
-            self.swin_layers = nn.ModuleList([
-                MiniSwinBlock(joint_dim, num_heads=8, window_size=7)
-            ])
-
-        if model_type == "multimodal":
-            self.image_enhancer = nn.Sequential(
-                GlobalAttentionBlock(joint_dim, num_heads=8),
-                MiniSwinBlock(joint_dim, num_heads=8, window_size=7)
-            )
+        
+        """
+        # set up image enhancer
+        self.image_enhancer = nn.Sequential(
+            GlobalAttentionBlock(joint_dim, num_heads=8),
+            MiniSwinBlock(joint_dim, num_heads=8, window_size=7)
+        )
+        """
 
         # set up fusion
         if fusion_type == "cross":
@@ -360,13 +352,15 @@ class MultiModalRetrievalModel(nn.Module):
             attention_mask.to(self.device) if attention_mask is not None else None
         )
 
-        # Image enhancement
+        """
+        # Image enhancement temporary comment out because finetune have done it
         p = self.img_proj(img_patches)
         g = self.img_proj(img_global)
         seq = torch.cat([g.unsqueeze(1), p], dim=1)
         seq = self.image_enhancer(seq)
         img_global = seq[:, 0, :]          # use global token
         img_patches = seq[:, 1:, :]
+        """
 
         img_emb = self.img_proj(img_global) if img_global is not None else None
         if txt_feats is not None:
@@ -470,14 +464,7 @@ class MultiModalRetrievalModel(nn.Module):
             p = self.img_proj(img_patches)
             seq = torch.cat([g.unsqueeze(1), p], dim=1)
 
-            # Global attention first
-            for blk in self.global_layers:
-                seq = blk(seq)
-
-            # Local refinement (MiniSwin)
-            for blk in self.swin_layers:
-                seq = blk(seq)
-
+            # Pooling
             pooled = seq.mean(dim=1)
             joint_emb = self.shared_ffn(pooled) if self.use_shared_ffn else self.ffn[0](pooled)
 
