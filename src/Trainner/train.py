@@ -797,8 +797,4 @@ if __name__ == '__main__':
     with open(EMBED_SAVE_PATH / "train_ids.json", "w") as f:
         json.dump(train_ids, f)
 
-    from train_label_attention import train as train_label_attention
-
-    train_label_attention()
-
     print("Done.")
