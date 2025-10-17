@@ -39,10 +39,12 @@ EMBED_SAVE_PATH = BASE_DIR / 'embeddings'
 ATTN_DIR = BASE_DIR / 'attention_maps'
 CSV_EVAL_SAVE_PATH = BASE_DIR / 'eval_csvs'
 CONFIG_DIR = BASE_DIR / 'configs'
+SWIN_FINETUNE_DIR = BASE_DIR / 'finetune_swin_outputs'
 CSV_EVAL_SAVE_PATH.mkdir(exist_ok=True)
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 EMBED_SAVE_PATH.mkdir(exist_ok=True)
 ATTN_DIR.mkdir(exist_ok=True)
+SWIN_FINETUNE_DIR.mkdir(exist_ok=True)
 os.environ['TRANSFORMERS_CACHE'] = str(MODEL_DIR)
 
 # --- Config ---
@@ -298,7 +300,7 @@ if __name__ == '__main__':
     wandb.define_metric("swin/ap_macro", step_metric="swin/epoch")
 
     # Finetune SWIN 
-    swin_ckpt_path = MODEL_DIR / "finetuned_swin_labelaware.safetensors"
+    swin_ckpt_path = SWIN_FINETUNE_DIR / "finetuned_swin_labelaware.safetensors"
     if not swin_ckpt_path.exists():
         print("Finetuning SWIN...")
         swin_finetune(
@@ -490,7 +492,7 @@ if __name__ == '__main__':
         num_heads=num_heads,
         fusion_type=FUSION_TYPE,
         img_backbone=image_backbone,
-        swin_ckpt_path=MODEL_DIR / "finetuned_swin_labelaware.safetensors",
+        swin_ckpt_path=SWIN_FINETUNE_DIR / "finetuned_swin_labelaware.safetensors",
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
         device=device,
         use_shared_ffn=cfg.use_shared_ffn,

@@ -12,6 +12,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import copy
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 from safetensors.torch import save_model
 
@@ -19,21 +21,22 @@ from DataHandler import parse_openi_xml, build_dataloader
 from Model import Backbones
 from Model import SwinModelForFinetune
 from Helpers import Config
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import WeightedRandomSampler
 from LabelData import disease_groups, normal_groups, finding_groups, symptom_groups
 from sklearn.metrics import (
     f1_score, precision_score, recall_score,
     average_precision_score, roc_auc_score,
-    precision_recall_curve
+    precision_recall_curve, classification_report
 )
+from safetensors.torch import load_file
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 MODEL_DIR = BASE_DIR / "models"
 CONFIG_DIR = BASE_DIR / "configs"
 SPLIT_DIR = BASE_DIR / "splited_data"
-OUTPUT_DIR = MODEL_DIR
+OUTPUT_DIR = BASE_DIR / "finetune_swin_outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 class FocalBCEWithLogits(nn.Module):
@@ -66,6 +69,64 @@ class FocalBCEWithLogits(nn.Module):
         elif self.reduction == "sum":
             return loss.sum()
         return loss
+    
+class HybridLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0, bce_weight=0.5, focal_weight=0.5):
+        super().__init__()
+        self.bce = nn.BCEWithLogitsLoss(reduction="mean", pos_weight=alpha)
+        self.focal = FocalBCEWithLogits(alpha=alpha, gamma=gamma, reduction="mean")
+        self.bce_w = bce_weight
+        self.focal_w = focal_weight
+
+    def forward(self, logits, targets):
+        return self.bce_w * self.bce(logits, targets) + self.focal_w * self.focal(logits, targets)
+
+class AsymmetricLoss(nn.Module):
+    """
+    Asymmetric Loss for Multi-Label Classification
+    Ref: https://arxiv.org/abs/2009.14119
+    """
+    def __init__(self, gamma_pos=0, gamma_neg=4, clip=0.05, eps=1e-8, disable_torch_grad_focal_loss=True):
+        super(AsymmetricLoss, self).__init__()
+        self.gamma_pos = gamma_pos
+        self.gamma_neg = gamma_neg
+        self.clip = clip
+        self.eps = eps
+        self.disable_torch_grad_focal_loss = disable_torch_grad_focal_loss
+
+    def forward(self, logits, targets):
+        """
+        logits: (B, L)
+        targets: (B, L) in {0,1}
+        """
+        probas = torch.sigmoid(logits)
+        targets = targets.type_as(logits)
+
+        # Asymmetric clipping (for negatives)
+        if self.clip is not None and self.clip > 0:
+            pt = (probas + self.clip).clamp(max=1)
+        else:
+            pt = probas
+
+        # Loss calculation
+        loss_pos = targets * torch.log(probas.clamp(min=self.eps))
+        loss_neg = (1 - targets) * torch.log((1 - pt).clamp(min=self.eps))
+
+        loss = loss_pos + loss_neg
+
+        # Asymmetric focusing
+        if self.gamma_pos > 0 or self.gamma_neg > 0:
+            pt_pos = probas * targets
+            pt_neg = (1 - probas) * (1 - targets)
+            pt_comb = pt_pos + pt_neg
+
+            if self.disable_torch_grad_focal_loss:
+                pt_comb = pt_comb.detach()
+
+            one_sided_gamma = self.gamma_pos * targets + self.gamma_neg * (1 - targets)
+            loss *= (1 - pt_comb) ** one_sided_gamma
+
+        return -loss.mean()
 
 def make_multilabel_sampler(records):
     """
@@ -84,7 +145,8 @@ def make_multilabel_sampler(records):
     # sample weights
     sample_weights = labels.dot(class_weights)  # shape (N,)
     sample_weights = np.where(sample_weights > 0, sample_weights, np.min(sample_weights[sample_weights>0]) if np.any(sample_weights>0) else 1.0)
-
+    
+    # create sampler
     return WeightedRandomSampler(weights=torch.from_numpy(sample_weights),
                                     num_samples=len(sample_weights),
                                     replacement=True)
@@ -92,6 +154,9 @@ def make_multilabel_sampler(records):
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+def smooth_labels(labels, smoothing=0.01):
+    # labels in {0,1}, output in [smoothing, 1-smoothing]
+    return labels * (1.0 - smoothing) + 0.5 * smoothing
 
 def build_finetune_subset(xml_dir, dicom_root, combined_groups, split_dir,
                             finetune_ratio=0.4, train_ratio=0.75, seed=42, max_retry=20):
@@ -183,18 +248,107 @@ def unfreeze_last_stage(backbones: Backbones):
     total = sum(p.numel() for p in backbones.swin.parameters())
     print(f"[DEBUG] Partial unfreeze: {trainable:,}/{total:,} params trainable ({trainable/total:.2%})")
 
+def lr_finder(optimizer, model, criterion, train_loader, device,
+              init_lr=1e-7, final_lr=1e-1, beta=0.98):
+    lrs, losses = [], []
+    best_loss = float('inf')
+
+    model_state = copy.deepcopy(model.state_dict())
+
+    num_batches = len(train_loader) - 1
+    mult = (final_lr / init_lr) ** (1/num_batches)
+    lr = init_lr
+    for pg in optimizer.param_groups:
+        pg['lr'] = lr
+
+    avg_loss, batch_num = 0.0, 0
+    model.train()
+    for batch in train_loader:
+        batch_num += 1
+        imgs = batch["image"].to(device)
+        labels = batch["labels"].to(device).float()
+
+        optimizer.zero_grad()
+        logits, _, _ = model(imgs)
+        loss = criterion(logits, labels)
+
+        avg_loss = beta * avg_loss + (1-beta) * loss.item()
+        smooth_loss = avg_loss / (1 - beta**batch_num)
+
+        lrs.append(lr)
+        losses.append(smooth_loss)
+
+        if batch_num > 1 and smooth_loss > 4 * best_loss:
+            break
+        if smooth_loss < best_loss:
+            best_loss = smooth_loss
+
+        loss.backward()
+        optimizer.step()
+
+        lr *= mult
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr
+
+    model.load_state_dict(model_state)
+    return lrs, losses
+
+def quick_eval(model, train_loader, val_loader, criterion, device, steps=200):
+    """
+    Run a short warmup training to evaluate candidate ASL settings.
+    Returns composite score (macro F1 + AUROC).
+    """
+    model_copy = copy.deepcopy(model).to(device)
+    opt = optim.AdamW(model_copy.parameters(), lr=1e-4)
+    model_copy.train()
+
+    it = iter(train_loader)
+    for i in range(steps):
+        try:
+            batch = next(it)
+        except StopIteration:
+            it = iter(train_loader)
+            batch = next(it)
+        imgs, labels = batch["image"].to(device), batch["labels"].float().to(device)
+        opt.zero_grad()
+        logits, _, _ = model_copy(imgs)
+        loss = criterion(logits, labels)
+        loss.backward()
+        opt.step()
+
+    # Quick validation
+    model_copy.eval()
+    all_logits, all_labels = [], []
+    with torch.no_grad():
+        for batch in val_loader:
+            imgs, labels = batch["image"].to(device), batch["labels"].float().to(device)
+            logits, _, _ = model_copy(imgs)
+            all_logits.append(logits.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+    all_logits, all_labels = np.vstack(all_logits), np.vstack(all_labels)
+    probs = torch.sigmoid(torch.from_numpy(all_logits)).numpy()
+
+    y_bin = (probs > 0.5).astype(int)
+    macro_f1 = f1_score(all_labels, y_bin, average="macro", zero_division=0)
+    try:
+        macro_auc = roc_auc_score(all_labels, probs, average="macro")
+    except:
+        macro_auc = 0.5
+    return 0.5 * macro_f1 + 0.5 * macro_auc
+
 def train(
     cfg=None,
     finetune_mode="partial",     # "frozen" | "partial" | "full"
     swin_init_ckpt=None,
-    out_path=None,
+    out_path=OUTPUT_DIR,
     epochs=None,
     batch_size=None,
     lr=None,
     weight_decay=1e-2,
     device=None,
     augment=True,
-    use_focal = True
+    loss = "hybrid",
+    see_debug=False
 ):
     """
     Finetune Swin model with given config and records.
@@ -210,7 +364,7 @@ def train(
         weight_decay (float): Weight decay for Adam optimizer.
         device (str): Device to use (e.g. "cuda", "cpu").
         augment (bool): Whether to use data augmentation for training.
-        use_focal (bool): Whether to use focal loss
+        loss (str): Whether to use focal loss. Options: "hybrid", "focal", "bce".
     Returns:
         None
 
@@ -271,31 +425,16 @@ def train(
         max_length=cfg.text_dim
     )
 
-    # Print loader batch info (you already do some of these)
-    batch = next(iter(train_loader))
-    imgs = batch['image']
-    labels = batch['labels']
-    print("imgs.shape", imgs.shape)              # should be [B, 3, H, W]
-    print("imgs.dtype", imgs.dtype)
-    print("imgs.min/max", float(imgs.min()), float(imgs.max()))
-    print("imgs.mean/std", float(imgs.mean()), float(imgs.std()))
-    print("labels.shape", labels.shape)
-    print("labels.min/max", labels.min(), labels.max())
-    print("labels.dtype", labels.dtype)
-
-    # Confirm label values are float 0/1
-    labels = labels.float()
-    print("labels unique counts:", torch.unique(labels, return_counts=True))
-
     # Compute pos_weight
     label_counts = np.array([r['labels'] for r in train_records]).sum(axis=0)
     num_samples = len(train_records)
     label_counts = torch.tensor(label_counts, dtype=torch.float32)
     pos_weight = ((num_samples - label_counts) / (label_counts + 1e-9))
-    pos_weight = pos_weight.clamp(min=1.0, max=5.0)  # clamp to avoid extreme values
+    pos_weight = pos_weight.clamp(min=1.0, max=3.0)  # clamp to avoid extreme values
     pos_weight = pos_weight.to(device)
 
-    print("[DEBUG] pos_weight stats:", pos_weight.min().item(), pos_weight.max().item())
+    if see_debug:
+        print("[DEBUG] pos_weight stats:", pos_weight.min().item(), pos_weight.max().item())
 
     label_freq = (label_counts / float(num_samples)).clamp(min=1e-6)  # tensor len L, on CPU or device?
     # invert and normalize into [0,1]
@@ -304,7 +443,9 @@ def train(
     alpha_pos = alpha_pos.clamp(0.01, 0.99).to(device)
     alpha_pos = alpha_pos.to(device)  # move to device for loss later
     gamma = 2.0  # experiment with 1.0..3.0
-    print(f"[DEBUG] focal alpha_pos sample (first 10): {alpha_pos[:10].tolist()}, gamma={gamma}")
+
+    if see_debug:
+        print(f"[DEBUG] focal alpha_pos sample (first 10): {alpha_pos[:10].tolist()}, gamma={gamma}")
 
     # Instantiate backbone
     backbones = Backbones(
@@ -348,23 +489,40 @@ def train(
     trainable_params = sum(p.numel() for p in backbones.parameters() if p.requires_grad)
     print(f"[DIAG] After freeze/unfreeze: Backbone params: {trainable_params:,}/{total_params:,} trainable ({trainable_params/total_params:.2%})")
 
-    # Check model output shape on a batch
-    model.eval()
-    with torch.no_grad():
-        logits, _, _ = model(imgs.to(device))
-    print("logits.shape", logits.shape)          # should be [B, num_classes]
-    print("logits mean/min/max/std (cpu)", logits.detach().cpu().numpy().mean(),
-                                            logits.detach().cpu().numpy().min(),
-                                            logits.detach().cpu().numpy().max(),
-                                            logits.detach().cpu().numpy().std())
+    if see_debug:
+        # Print loader batch info (you already do some of these)
+        batch = next(iter(train_loader))
+        imgs = batch['image']
+        labels = batch['labels']
+        print("imgs.shape", imgs.shape)              # should be [B, 3, H, W]
+        print("imgs.dtype", imgs.dtype)
+        print("imgs.min/max", float(imgs.min()), float(imgs.max()))
+        print("imgs.mean/std", float(imgs.mean()), float(imgs.std()))
+        print("labels.shape", labels.shape)
+        print("labels.min/max", labels.min(), labels.max())
+        print("labels.dtype", labels.dtype)
 
-    batch = next(iter(train_loader))
-    print("sampled batch label sums:", batch['labels'].sum(dim=0)[:30].tolist())
+        # Confirm label values are float 0/1
+        labels = labels.float()
+        print("labels unique counts:", torch.unique(labels, return_counts=True))
 
-    train_labels = np.array([r['labels'] for r in train_records])
-    val_labels = np.array([r['labels'] for r in val_records])
-    print("train prevalence (first 20):", train_labels.sum(axis=0) / len(train_labels))
-    print("val prevalence (first 20):", val_labels.sum(axis=0) / len(val_labels))
+        # Check model output shape on a batch
+        model.eval()
+        with torch.no_grad():
+            logits, _, _ = model(imgs.to(device))
+        print("logits.shape", logits.shape)          # should be [B, num_classes]
+        print("logits mean/min/max/std (cpu)", logits.detach().cpu().numpy().mean(),
+                                                logits.detach().cpu().numpy().min(),
+                                                logits.detach().cpu().numpy().max(),
+                                                logits.detach().cpu().numpy().std())
+
+        batch = next(iter(train_loader))
+        print("sampled batch label sums:", batch['labels'].sum(dim=0)[:30].tolist())
+
+        train_labels = np.array([r['labels'] for r in train_records])
+        val_labels = np.array([r['labels'] for r in val_records])
+        print("train prevalence (first 20):", train_labels.sum(axis=0) / len(train_labels))
+        print("val prevalence (first 20):", val_labels.sum(axis=0) / len(val_labels))
 
     # Separate params
     backbone_params = [p for _, p in backbones.named_parameters() if p.requires_grad]
@@ -377,48 +535,130 @@ def train(
     if backbone_params:
         param_groups.append({"params": backbone_params, "lr": lr * 0.1})
 
-    optimizer = optim.AdamW(param_groups, lr=lr, weight_decay=weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-    
-    if use_focal:
-        # pass alpha_pos as positive-class weighting into focal loss
+    # Loss function 
+    if loss == "hybrid":
+        criterion = HybridLoss(alpha=pos_weight, gamma=gamma, bce_weight=0.8, focal_weight=0.2)
+    elif loss == "focal":
         criterion = FocalBCEWithLogits(alpha=alpha_pos, gamma=gamma, reduction="mean")
-    else:
+    elif loss == "bce":
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    elif loss == "asl":
+        criterion = AsymmetricLoss(gamma_pos=0, gamma_neg=4, clip=0.05)
+    elif loss == "asl-auto":
+        candidate_settings = [
+            {"gamma_pos": 0, "gamma_neg": 2, "clip": 0},
+            {"gamma_pos": 0, "gamma_neg": 4, "clip": 0},
+            {"gamma_pos": 1, "gamma_neg": 2, "clip": 0.05},
+            {"gamma_pos": 1, "gamma_neg": 4, "clip": 0.05},
+        ]
+        best_cfg, best_score = None, -1
+        for cand in candidate_settings:
+            print(f"[ASL-AUTO] Trying config: {cand}")
+            crit = AsymmetricLoss(**cand)
+            score = quick_eval(model, train_loader, val_loader, crit, device, steps=200)
+            print(f"[ASL-AUTO] Candidate score={score:.4f}")
+            if score > best_score:
+                best_cfg, best_score = cand, score
+        print(f"[ASL-AUTO] Selected config: {best_cfg} with score={best_score:.4f}")
+        criterion = AsymmetricLoss(**best_cfg)
+    else:
+        raise ValueError("loss must be one of: focal, bce, hybrid, asl")
+
+    # Build a temporary optimizer for LR finder
+    tmp_optimizer = optim.AdamW(model.parameters(), lr=1e-7, weight_decay=weight_decay)
+
+    print("[INFO] Running LR finder...")
+    lrs, losses = lr_finder(tmp_optimizer, model, criterion, train_loader, device)
+
+    # Plot curve (optional if running in notebook)
+    try:
+        plt.plot(lrs, losses)
+        plt.xscale("log")
+        plt.xlabel("Learning rate")
+        plt.ylabel("Smoothed loss")
+        plt.title("LR Finder")
+        plt.savefig(out_path / "lr_finder_curve.png")
+        plt.close()
+    except Exception as e:
+        print("[WARN] Could not plot LR curve:", e)
+
+    # Pick best LR = 10x lower than LR where loss starts rising
+    min_loss_idx = int(np.argmin(losses))
+    best_lr = lrs[min_loss_idx]
+    chosen_lr = best_lr / 10
+    print(f"[INFO] LR Finder suggests: {chosen_lr:.2e}")
+
+    # Rebuild optimizer with discriminative LR
+    param_groups = [{"params": head_params, "lr": chosen_lr}]
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": chosen_lr * 0.1})
+
+
+    optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+
+    use_label_smoothing = True
+    if loss in ("focal", "hybrid"):
+        use_label_smoothing = False
 
     best_score = -float("inf")
     best_epoch = -1
-    out_path = Path(out_path or (MODEL_DIR / "finetuned_swin_labelaware.safetensors"))
+    out_path_file = out_path / "finetuned_swin_labelaware.safetensors"
     patience = cfg.patience
     epochs_no_improve = 0
 
+    if see_debug:
+        # run a quick overfit test on 1 batch (temp code)
+        model.train()
+        batch = next(iter(train_loader))
+        imgs = batch["image"].to(device)
+        labels = batch["labels"].to(device)
+        tmp_opt = optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=chosen_lr, weight_decay=weight_decay)
+        for i in range(20):
+            tmp_opt.zero_grad()
+            logits, _, _ = model(imgs)
+            loss = criterion(logits, labels)
 
-    # run a quick overfit test on 1 batch (temp code)
-    model.train()
-    batch = next(iter(train_loader))
-    imgs = batch["image"].to(device)
-    labels = batch["labels"].to(device)
-    tmp_opt = optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=weight_decay)
-    for i in range(20):
-        tmp_opt.zero_grad()
-        logits, _, _ = model(imgs)
-        loss = criterion(logits, labels)
+            logits_np = logits.detach().cpu().numpy()
+            print("logits mean/min/max/std:", logits_np.mean(), logits_np.min(), logits_np.max(), logits_np.std())
 
-        logits_np = logits.detach().cpu().numpy()
-        print("logits mean/min/max/std:", logits_np.mean(), logits_np.min(), logits_np.max(), logits_np.std())
-
-        loss.backward()
-        tmp_opt.step()
-        if i % 5 == 0:
-            print(f"[OVERFIT] step {i}, loss={loss.item():.6f}")
-
+            loss.backward()
+            tmp_opt.step()
+            if i % 5 == 0:
+                print(f"[OVERFIT] step {i}, loss={loss.item():.6f}")
+    
+    # Main training loop
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
         pbar = tqdm(train_loader, desc=f"Finetuning Swin Epoch {epoch}/{epochs}")
+
+        if epoch == 1:
+            freeze_backbone(backbones)          # only head trains
+        elif epoch == 5:
+            unfreeze_last_stage(backbones)      # last stage + norms
+        elif epoch == 10:
+            unfreeze_backbone(backbones)        # all layers train
+
+        # ---- Dynamic reweighting ----
+        epoch_factor = min(1.0, epoch / 10.0)
+        dyn_pos_weight = (1 - epoch_factor) * torch.ones_like(pos_weight) + epoch_factor * pos_weight
+
+        if loss == "hybrid":
+            criterion = HybridLoss(alpha=dyn_pos_weight, gamma=gamma, bce_weight=0.7, focal_weight=0.3)
+        elif loss == "focal":
+            criterion = FocalBCEWithLogits(alpha=alpha_pos, gamma=gamma, reduction="mean")
+        elif loss == "bce":
+            criterion = nn.BCEWithLogitsLoss(pos_weight=dyn_pos_weight)
+        elif loss == "asl":
+            criterion = AsymmetricLoss(pos_weight=dyn_pos_weight)
+
         for batch in pbar:
             imgs = batch["image"].to(device)
-            labels = batch["labels"].to(device).float()
+            if use_label_smoothing:
+                labels = smooth_labels(batch["labels"].to(device).float(), smoothing=0.01)
+            else:
+                labels = batch["labels"].to(device).float()
 
             optimizer.zero_grad()
             logits, _, _ = model(imgs)
@@ -426,13 +666,11 @@ def train(
 
             loss.backward()
 
-            # after backward and before optimizer.step
+            # Clip gradient norm
             head_grad_sum = 0.0
             for p in head_params:
                 if p.grad is not None:
                     head_grad_sum += float(p.grad.abs().sum().cpu())
-            print("head_grad_sum:", head_grad_sum)
-
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -489,12 +727,11 @@ def train(
             torch.from_numpy(all_logits).float().to(device) / max(T_val, 1e-6)
         ).cpu().numpy()
 
-        np.save(MODEL_DIR / "last_val_temperature.npy", np.array([T_val], dtype=float))
+        np.save(out_path/ "last_val_temperature.npy", np.array([T_val], dtype=float))
 
         # ----- Metrics -----
         probs = calibrated_probs  # use calibrated version here
-        y_bin = (probs > 0.5).astype(int)
-
+        # Compute best per-class thresholds for this epoch
         best_thr = np.zeros(probs.shape[1], dtype=float)
         for c in range(probs.shape[1]):
             try:
@@ -508,7 +745,8 @@ def train(
             except Exception:
                 best_thr[c] = 0.5
 
-        np.save(MODEL_DIR / "last_val_best_thresholds.npy", best_thr)
+        # Apply thresholds to get binary predictions
+        y_bin = (probs > best_thr[None, :]).astype(int)
 
         macro_f1 = f1_score(all_labels, y_bin, average='macro', zero_division=0)
         micro_f1 = f1_score(all_labels, y_bin, average='micro', zero_division=0)
@@ -528,7 +766,7 @@ def train(
         except Exception:
             macro_auc = np.nan
 
-        composite = 0.3 * macro_f1 + 0.7 * macro_auc
+        composite = 0.5 * macro_f1 + 0.5 * macro_auc
 
         print(
             f"[E{epoch}] train_loss={epoch_train_loss:.4f} | val_loss={val_loss:.4f} | "
@@ -554,19 +792,34 @@ def train(
             "swin/composite": composite,
             "swin/epoch": epoch
         })
-        
+
         # Save best or count non-improving epochs
         if composite > best_score:
             best_score = composite
             best_epoch = epoch
             epochs_no_improve = 0
             try:
-                save_model(model, str(out_path))
-                print(f"[INFO] Saved best model checkpoint (safe) to {out_path} (epoch {epoch})")
+                save_model(model, str(out_path_file))
+                print(f"[INFO] Saved best model checkpoint (safe) to {out_path_file} (epoch {epoch})")
             except Exception as e:
                 print(f"[ERROR] safetensors save_model failed: {e}")
                 raise
             
+            # Save thresholds for later test-time inference
+            np.save(out_path / "last_val_best_thresholds.npy", best_thr)
+
+            # Save per-class report only for best epoch
+            report = classification_report(
+                all_labels, y_bin,
+                target_names=label_cols,
+                zero_division=0,
+                output_dict=True
+            )
+            per_class_path = out_path / f"per_class_report_best.json"
+            with open(per_class_path, "w") as f:
+                json.dump(report, f, indent=2)
+            print(f"[INFO] Saved best per-class report -> {per_class_path}")
+
             # Log best metrics to W&B summary
             wandb.run.summary["best_epoch"] = epoch
             wandb.run.summary["best_val_loss"] = val_loss
@@ -619,6 +872,98 @@ def train(
         }
     }
 
+    # Per-class threshold calibration
+    print("[INFO] Running final per-class threshold calibration...")
+    state_dict = load_file(str(out_path))
+    model.load_state_dict(state_dict)
+    model.eval()
+    all_logits, all_labels = [], []
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc="Final threshold calibration"):
+            imgs = batch["image"].to(device)
+            labels = batch["labels"].to(device).float()
+            logits, _, _ = model(imgs)
+            all_logits.append(logits.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+
+    all_logits = np.vstack(all_logits)
+    all_labels = np.vstack(all_labels)
+    probs = torch.sigmoid(torch.from_numpy(all_logits)).numpy()
+
+    final_thr = np.zeros(probs.shape[1], dtype=float)
+    for c in range(probs.shape[1]):
+        try:
+            p, r, t = precision_recall_curve(all_labels[:, c], probs[:, c])
+            f1s = 2 * p * r / (p + r + 1e-12)
+            idx = np.nanargmax(f1s)
+            final_thr[c] = float(t[idx]) if idx < len(t) else 0.5
+        except Exception:
+            final_thr[c] = 0.5
+
+    np.save(out_path / "final_per_class_thresholds.npy", final_thr)
+    print(f"[INFO] Saved per-class thresholds to {str(out_path)/'final_per_class_thresholds.npy'}")
+
+    y_bin_final = (probs > final_thr[None, :]).astype(int)
+
+    macro_f1_final = f1_score(all_labels, y_bin_final, average="macro", zero_division=0)
+    micro_f1_final = f1_score(all_labels, y_bin_final, average="micro", zero_division=0)
+    macro_prec_final = precision_score(all_labels, y_bin_final, average="macro", zero_division=0)
+    micro_prec_final = precision_score(all_labels, y_bin_final, average="micro", zero_division=0)
+    macro_rec_final = recall_score(all_labels, y_bin_final, average="macro", zero_division=0)
+    micro_rec_final = recall_score(all_labels, y_bin_final, average="micro", zero_division=0)
+
+    try:
+        macro_ap_final = average_precision_score(all_labels, probs, average="macro")
+        micro_ap_final = average_precision_score(all_labels, probs, average="micro")
+    except Exception:
+        macro_ap_final, micro_ap_final = np.nan, np.nan
+
+    try:
+        macro_auc_final = roc_auc_score(all_labels, probs, average="macro")
+    except Exception:
+        macro_auc_final = np.nan
+
+    composite_final = 0.5 * macro_f1_final + 0.5 * macro_auc_final
+    
+    best_payload["post_calibration"] = {
+        "f1_macro": macro_f1_final,
+        "f1_micro": micro_f1_final,
+        "precision_macro": macro_prec_final,
+        "precision_micro": micro_prec_final,
+        "recall_macro": macro_rec_final,
+        "recall_micro": micro_rec_final,
+        "ap_macro": macro_ap_final,
+        "ap_micro": micro_ap_final,
+        "auc_macro": macro_auc_final,
+        "composite": composite_final,
+    }
+    
+        # ---- Log post-calibration results to W&B ----
+    wandb.run.summary["postcal_f1_macro"] = macro_f1_final
+    wandb.run.summary["postcal_f1_micro"] = micro_f1_final
+    wandb.run.summary["postcal_precision_macro"] = macro_prec_final
+    wandb.run.summary["postcal_precision_micro"] = micro_prec_final
+    wandb.run.summary["postcal_recall_macro"] = macro_rec_final
+    wandb.run.summary["postcal_recall_micro"] = micro_rec_final
+    wandb.run.summary["postcal_ap_macro"] = macro_ap_final
+    wandb.run.summary["postcal_ap_micro"] = micro_ap_final
+    wandb.run.summary["postcal_auc_macro"] = macro_auc_final
+    wandb.run.summary["postcal_composite"] = composite_final
+
+    # Optional grouped log so it shows nicely in the run charts
+    wandb.log({
+        "swin/postcal_f1_macro": macro_f1_final,
+        "swin/postcal_f1_micro": micro_f1_final,
+        "swin/postcal_precision_macro": macro_prec_final,
+        "swin/postcal_precision_micro": micro_prec_final,
+        "swin/postcal_recall_macro": macro_rec_final,
+        "swin/postcal_recall_micro": micro_rec_final,
+        "swin/postcal_ap_macro": macro_ap_final,
+        "swin/postcal_ap_micro": micro_ap_final,
+        "swin/postcal_auc_macro": macro_auc_final,
+        "swin/postcal_composite": composite_final,
+    })
+
     try:
         with open(best_json_path, "w", encoding="utf8") as f:
             json.dump(best_payload, f, indent=2)
@@ -632,5 +977,20 @@ def train(
 
 
 if __name__ == "__main__":
-    train(epochs=3, finetune_mode="frozen",  lr=1e-4,
-            swin_init_ckpt=str(MODEL_DIR / "finetuned_swin_labelaware.safetensors"))
+    # current best is hybrid
+    mode = "partial"
+    loss_use = "asl-auto"
+    import datetime
+
+    wandb.init(
+        project="finetune-swin",
+        name="finetune-swin-labelaware-" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + f"-{mode}-{loss_use}",
+        group="finetune-swin",
+        job_type="finetune",
+    )
+    
+    train(
+        finetune_mode=mode,
+        loss=loss_use,
+    )
+
