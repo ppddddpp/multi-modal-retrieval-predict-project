@@ -874,7 +874,7 @@ def train(
 
     # Per-class threshold calibration
     print("[INFO] Running final per-class threshold calibration...")
-    state_dict = load_file(str(out_path))
+    state_dict = load_file(str(out_path_file))
     model.load_state_dict(state_dict)
     model.eval()
     all_logits, all_labels = [], []

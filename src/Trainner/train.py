@@ -261,6 +261,8 @@ if __name__ == '__main__':
             "la_epochs": cfg.la_epochs,
             "la_lr": cfg.la_lr,
             "la_patience": cfg.la_patience,
+
+            "swin_loss_type": "hybrid"
         }
     )
 
@@ -305,7 +307,8 @@ if __name__ == '__main__':
         print("Finetuning SWIN...")
         swin_finetune(
             finetune_mode="partial",
-            out_path=swin_ckpt_path
+            out_path=swin_ckpt_path,
+            loss="hybrid",
         )
     else:
         print(f"Using cached Swin checkpoint at {swin_ckpt_path}")
