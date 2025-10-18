@@ -122,6 +122,7 @@ class Backbones(nn.Module):
 
         else:
             raise ValueError(f"Unknown img_backbone {img_backbone}")
+        
         self.swin = self.vision
         if hasattr(self.swin, "norm") and isinstance(getattr(self.swin, "norm"), nn.Module):
             self.swin_norm = self.swin.norm

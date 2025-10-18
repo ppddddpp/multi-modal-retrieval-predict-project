@@ -16,6 +16,7 @@ import copy
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from safetensors.torch import save_model
+import random
 
 from DataHandler import parse_openi_xml, build_dataloader
 from Model import Backbones
@@ -29,7 +30,7 @@ from sklearn.metrics import (
     average_precision_score, roc_auc_score,
     precision_recall_curve, classification_report
 )
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -127,6 +128,14 @@ class AsymmetricLoss(nn.Module):
             loss *= (1 - pt_comb) ** one_sided_gamma
 
         return -loss.mean()
+    
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # Ensures deterministic behavior for some operations
+    torch.backends.cudnn.deterministic = True
 
 def make_multilabel_sampler(records):
     """
@@ -157,6 +166,61 @@ def get_device():
 def smooth_labels(labels, smoothing=0.01):
     # labels in {0,1}, output in [smoothing, 1-smoothing]
     return labels * (1.0 - smoothing) + 0.5 * smoothing
+
+def make_state_dict_no_shared_storage(state_dict: dict):
+    """
+    Return a copy of state_dict where any tensors that share underlying storage
+    are cloned (moved to CPU) so they no longer share memory. This makes the
+    dict safe to save via safetensors (which rejects shared-storage tensors).
+    """
+    # map storage_id -> list of keys that share that storage
+    storage_map = {}
+    for k, v in state_dict.items():
+        if not torch.is_tensor(v):
+            continue
+        # ensure on cpu for stable storage pointer; .storage().data_ptr() is int
+        try:
+            sid = (v.storage().data_ptr(), v.storage().size())
+        except Exception:
+            # Fallback: use id of storage object
+            sid = id(v.storage())
+        storage_map.setdefault(sid, []).append(k)
+
+    new_state = {}
+    # For keys whose tensors share storage we will clone for all keys except the first
+    handled = set()
+    for sid, keys in storage_map.items():
+        if len(keys) == 1:
+            k = keys[0]
+            t = state_dict[k]
+            # move to cpu (safetensors expects CPU tensors) and detach/copy reference
+            new_state[k] = t.detach().cpu()
+            handled.add(k)
+        else:
+            # multiple keys share the same storage: keep first as cpu tensor,
+            # clone CPU copy for the rest to avoid shared memory
+            first = True
+            for k in keys:
+                t = state_dict[k]
+                if first:
+                    new_state[k] = t.detach().cpu()
+                    first = False
+                else:
+                    # break shared storage by cloning a CPU copy
+                    new_state[k] = t.detach().cpu().clone()
+                handled.add(k)
+
+    # copy over non-tensor items (if any)
+    for k, v in state_dict.items():
+        if k in handled:
+            continue
+        # for safety: put tensors on cpu
+        if torch.is_tensor(v):
+            new_state[k] = v.detach().cpu()
+        else:
+            new_state[k] = v
+
+    return new_state
 
 def build_finetune_subset(xml_dir, dicom_root, combined_groups, split_dir,
                             finetune_ratio=0.4, train_ratio=0.75, seed=42, max_retry=20):
@@ -348,7 +412,8 @@ def train(
     device=None,
     augment=True,
     loss = "hybrid",
-    see_debug=False
+    see_debug=False,
+    seed=None
 ):
     """
     Finetune Swin model with given config and records.
@@ -365,6 +430,7 @@ def train(
         device (str): Device to use (e.g. "cuda", "cpu").
         augment (bool): Whether to use data augmentation for training.
         loss (str): Whether to use focal loss. Options: "hybrid", "focal", "bce".
+        seed (int): Random seed for reproducibility.
     Returns:
         None
 
@@ -380,6 +446,9 @@ def train(
     device = device or get_device()
     print(f"[INFO] device: {device}")
 
+    if seed is not None:
+        set_seed(seed)
+
     combined_groups = {**disease_groups, **normal_groups, **finding_groups, **symptom_groups}
     cfg = Config.load(CONFIG_DIR / 'config.yaml') if cfg is None else cfg
 
@@ -390,11 +459,12 @@ def train(
     # Prepare records
     xml_dir = BASE_DIR / 'data' / 'openi' / 'xml' / 'NLMCXR_reports' / 'ecgen-radiology'
     dicom_root = BASE_DIR / 'data' / 'openi' / 'dicom'
+    
     train_records, val_records, label_cols = build_finetune_subset(
         xml_dir, dicom_root, combined_groups, SPLIT_DIR,
         finetune_ratio=0.4,
         train_ratio=0.75,
-        seed=cfg.seed
+        seed=seed if seed is not None else 42
     )
     print(f"[INFO] train records: {len(train_records)}, val records: {len(val_records)}, labels: {len(label_cols)}")
 
@@ -798,13 +868,13 @@ def train(
             best_score = composite
             best_epoch = epoch
             epochs_no_improve = 0
-            try:
-                save_model(model, str(out_path_file))
-                print(f"[INFO] Saved best model checkpoint (safe) to {out_path_file} (epoch {epoch})")
-            except Exception as e:
-                print(f"[ERROR] safetensors save_model failed: {e}")
-                raise
-            
+
+            # Save best model
+            orig_state = model.state_dict()
+            safe_state = make_state_dict_no_shared_storage(orig_state)
+            save_file(safe_state, str(out_path_file))
+            print(f"[INFO] Saved best model -> {out_path_file}")
+
             # Save thresholds for later test-time inference
             np.save(out_path / "last_val_best_thresholds.npy", best_thr)
 
@@ -901,7 +971,7 @@ def train(
             final_thr[c] = 0.5
 
     np.save(out_path / "final_per_class_thresholds.npy", final_thr)
-    print(f"[INFO] Saved per-class thresholds to {str(out_path)/'final_per_class_thresholds.npy'}")
+    print(f"[INFO] Saved per-class thresholds to {out_path / 'final_per_class_thresholds.npy'}")
 
     y_bin_final = (probs > final_thr[None, :]).astype(int)
 
@@ -977,9 +1047,8 @@ def train(
 
 
 if __name__ == "__main__":
-    # current best is hybrid
     mode = "partial"
-    loss_use = "asl-auto"
+    loss_use = "hybrid"
     import datetime
 
     wandb.init(
@@ -992,5 +1061,6 @@ if __name__ == "__main__":
     train(
         finetune_mode=mode,
         loss=loss_use,
+        seed=2709
     )
 

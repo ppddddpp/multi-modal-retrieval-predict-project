@@ -302,8 +302,9 @@ if __name__ == '__main__':
     wandb.define_metric("swin/ap_macro", step_metric="swin/epoch")
 
     # Finetune SWIN 
-    swin_ckpt_path = SWIN_FINETUNE_DIR / "finetuned_swin_labelaware.safetensors"
-    if not swin_ckpt_path.exists():
+    swin_ckpt_path = SWIN_FINETUNE_DIR
+    swin_finetune_file = SWIN_FINETUNE_DIR / "finetuned_swin_labelaware.safetensors"
+    if not swin_finetune_file.exists():
         print("Finetuning SWIN...")
         swin_finetune(
             finetune_mode="partial",
