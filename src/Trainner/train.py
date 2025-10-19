@@ -310,6 +310,7 @@ if __name__ == '__main__':
             finetune_mode="partial",
             out_path=swin_ckpt_path,
             loss="hybrid",
+            seed=cfg.seed
         )
     else:
         print(f"Using cached Swin checkpoint at {swin_ckpt_path}")

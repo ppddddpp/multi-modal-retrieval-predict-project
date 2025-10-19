@@ -86,14 +86,34 @@ class AsymmetricLoss(nn.Module):
     """
     Asymmetric Loss for Multi-Label Classification
     Ref: https://arxiv.org/abs/2009.14119
+
+    Added optional `pos_weight` (per-class multiplier applied to the positive part of the loss).
     """
-    def __init__(self, gamma_pos=0, gamma_neg=4, clip=0.05, eps=1e-8, disable_torch_grad_focal_loss=True):
+    def __init__(
+        self,
+        gamma_pos=0,
+        gamma_neg=4,
+        clip=0.05,
+        eps=1e-8,
+        disable_torch_grad_focal_loss=True,
+        pos_weight=None,
+    ):
         super(AsymmetricLoss, self).__init__()
         self.gamma_pos = gamma_pos
         self.gamma_neg = gamma_neg
         self.clip = clip
         self.eps = eps
         self.disable_torch_grad_focal_loss = disable_torch_grad_focal_loss
+
+        # store pos_weight (convert to tensor if needed)
+        if pos_weight is not None and not torch.is_tensor(pos_weight):
+            # allow list/ndarray/tensor/torch.Tensor input
+            try:
+                pos_weight = torch.tensor(pos_weight, dtype=torch.float32)
+            except Exception:
+                # fallback: leave as-is (will raise later if incompatible)
+                pass
+        self.pos_weight = pos_weight
 
     def forward(self, logits, targets):
         """
@@ -112,6 +132,14 @@ class AsymmetricLoss(nn.Module):
         # Loss calculation
         loss_pos = targets * torch.log(probas.clamp(min=self.eps))
         loss_neg = (1 - targets) * torch.log((1 - pt).clamp(min=self.eps))
+
+        # apply per-class pos_weight if provided (broadcastable)
+        if self.pos_weight is not None:
+            pw = self.pos_weight.to(logits.device)
+            # ensure shape is (1, C) for broadcasting across batch dimension
+            if pw.dim() == 1:
+                pw = pw.view(1, -1)
+            loss_pos = loss_pos * pw
 
         loss = loss_pos + loss_neg
 
@@ -400,6 +428,32 @@ def quick_eval(model, train_loader, val_loader, criterion, device, steps=200):
         macro_auc = 0.5
     return 0.5 * macro_f1 + 0.5 * macro_auc
 
+def thresholds_min_precision(y_true, probs, p_target=0.20, min_thr=0.02):
+    """Return per-class thresholds that achieve at least p_target precision if possible, else maximize F1.
+       p_target: desired minimum precision (try 0.20 or 0.25).
+       min_thr: minimal allowed threshold so very tiny probs can be accepted.
+    """
+    C = y_true.shape[1]
+    thr = np.zeros(C, dtype=float)
+    for c in range(C):
+        p, r, t = precision_recall_curve(y_true[:, c], probs[:, c])
+        # find thresholds where precision >= target
+        idxs = np.where(p >= p_target)[0]
+        if idxs.size > 0:
+            # pick the threshold with highest recall among those that satisfy precision >= p_target
+            best_idx = idxs[np.argmax(r[idxs])]
+            thr[c] = t[best_idx] if best_idx < len(t) else 0.5
+        else:
+            # fallback to F1-optimal
+            f1s = 2 * p * r / (p + r + 1e-12)
+            if f1s.size > 0:
+                best_idx = np.nanargmax(f1s)
+                thr[c] = t[best_idx] if best_idx < len(t) else 0.5
+            else:
+                thr[c] = 0.5
+        thr[c] = max(thr[c], min_thr)
+    return thr
+
 def train(
     cfg=None,
     finetune_mode="partial",     # "frozen" | "partial" | "full"
@@ -429,7 +483,7 @@ def train(
         weight_decay (float): Weight decay for Adam optimizer.
         device (str): Device to use (e.g. "cuda", "cpu").
         augment (bool): Whether to use data augmentation for training.
-        loss (str): Whether to use focal loss. Options: "hybrid", "focal", "bce".
+        loss (str): Whether to use focal loss. Options: "hybrid", "bce", "asl", "asl-auto"
         seed (int): Random seed for reproducibility.
     Returns:
         None
@@ -500,7 +554,14 @@ def train(
     num_samples = len(train_records)
     label_counts = torch.tensor(label_counts, dtype=torch.float32)
     pos_weight = ((num_samples - label_counts) / (label_counts + 1e-9))
-    pos_weight = pos_weight.clamp(min=1.0, max=3.0)  # clamp to avoid extreme values
+    support = label_counts.clone()
+    cap = torch.where(support < 20,
+                    torch.tensor(10.0, device=pos_weight.device),
+                    torch.tensor(5.0, device=pos_weight.device))
+    pos_weight = torch.min(pos_weight, cap).clamp(min=1.0).to(device)
+
+    # ensure minimum 1.0 still
+    pos_weight = pos_weight.clamp(min=1.0)
     pos_weight = pos_weight.to(device)
 
     if see_debug:
@@ -509,7 +570,7 @@ def train(
     label_freq = (label_counts / float(num_samples)).clamp(min=1e-6)  # tensor len L, on CPU or device?
     # invert and normalize into [0,1]
     inv = 1.0 / label_freq
-    alpha_pos = 0.5 + 0.5 * (inv / inv.max())   # maps to [0.5, 1.0]
+    alpha_pos = 0.7 + 0.3 * (inv / inv.max())   # maps roughly to [0.7, 1.0]
     alpha_pos = alpha_pos.clamp(0.01, 0.99).to(device)
     alpha_pos = alpha_pos.to(device)  # move to device for loss later
     gamma = 2.0  # experiment with 1.0..3.0
@@ -607,13 +668,13 @@ def train(
 
     # Loss function 
     if loss == "hybrid":
-        criterion = HybridLoss(alpha=pos_weight, gamma=gamma, bce_weight=0.8, focal_weight=0.2)
+        criterion = HybridLoss(alpha=pos_weight, gamma=gamma, bce_weight=0.6, focal_weight=0.4)
     elif loss == "focal":
         criterion = FocalBCEWithLogits(alpha=alpha_pos, gamma=gamma, reduction="mean")
     elif loss == "bce":
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     elif loss == "asl":
-        criterion = AsymmetricLoss(gamma_pos=0, gamma_neg=4, clip=0.05)
+        criterion = AsymmetricLoss(gamma_pos=1, gamma_neg=3, clip=0.05)
     elif loss == "asl-auto":
         candidate_settings = [
             {"gamma_pos": 0, "gamma_neg": 2, "clip": 0},
@@ -661,8 +722,7 @@ def train(
     # Rebuild optimizer with discriminative LR
     param_groups = [{"params": head_params, "lr": chosen_lr}]
     if backbone_params:
-        param_groups.append({"params": backbone_params, "lr": chosen_lr * 0.1})
-
+        param_groups.append({"params": backbone_params, "lr": chosen_lr * 0.01})
 
     optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
@@ -711,11 +771,11 @@ def train(
             unfreeze_backbone(backbones)        # all layers train
 
         # ---- Dynamic reweighting ----
-        epoch_factor = min(1.0, epoch / 10.0)
+        epoch_factor = min(1.0, epoch / 20.0)
         dyn_pos_weight = (1 - epoch_factor) * torch.ones_like(pos_weight) + epoch_factor * pos_weight
 
         if loss == "hybrid":
-            criterion = HybridLoss(alpha=dyn_pos_weight, gamma=gamma, bce_weight=0.7, focal_weight=0.3)
+            criterion = HybridLoss(alpha=dyn_pos_weight, gamma=gamma, bce_weight=0.6, focal_weight=0.4)
         elif loss == "focal":
             criterion = FocalBCEWithLogits(alpha=alpha_pos, gamma=gamma, reduction="mean")
         elif loss == "bce":
@@ -787,7 +847,8 @@ def train(
 
             optimizer_T.step(_closure)
             T_val = float(torch.exp(log_T).detach().cpu().item())
-            print(f"[INFO] Calibrated temperature: {T_val:.4f}")
+            T_val = max(T_val, 1.0)   # enforce at least 1.0; try 1.2 if negatives stay extreme
+            print(f"[INFO] Calibrated temperature (clipped min=1.0): {T_val:.4f}")
         except Exception as e:
             print(f"[WARN] Temperature scaling failed: {e}")
             T_val = 1.0
@@ -802,20 +863,11 @@ def train(
         # ----- Metrics -----
         probs = calibrated_probs  # use calibrated version here
         # Compute best per-class thresholds for this epoch
-        best_thr = np.zeros(probs.shape[1], dtype=float)
-        for c in range(probs.shape[1]):
-            try:
-                p, r, t = precision_recall_curve(all_labels[:, c], probs[:, c])
-                f1s = 2 * p * r / (p + r + 1e-12)
-                if f1s.size > 0:
-                    idx = np.nanargmax(f1s)
-                    best_thr[c] = float(t[idx]) if idx < len(t) else 0.5
-                else:
-                    best_thr[c] = 0.5
-            except Exception:
-                best_thr[c] = 0.5
+        best_thr = thresholds_min_precision(all_labels, probs, p_target=0.20, min_thr=0.02)
+        best_thr = np.clip(best_thr, 0.02, 0.9)
 
         # Apply thresholds to get binary predictions
+        best_thr = np.clip(best_thr, 0.05, 0.9)
         y_bin = (probs > best_thr[None, :]).astype(int)
 
         macro_f1 = f1_score(all_labels, y_bin, average='macro', zero_division=0)
@@ -877,6 +929,19 @@ def train(
 
             # Save thresholds for later test-time inference
             np.save(out_path / "last_val_best_thresholds.npy", best_thr)
+
+            # Debug save for post-mortem
+            np.savez(out_path / f"debug_epoch{epoch}_run{wandb.run.id}.npz",
+                    probs=probs, labels=all_labels, pos_weight=pos_weight.detach().cpu().numpy(),
+                    alpha_pos=alpha_pos.detach().cpu().numpy() if isinstance(alpha_pos, torch.Tensor) else np.array(alpha_pos),
+                    best_thr=best_thr, T_val=np.array([T_val]))
+            # quick summary of true-positive prob distribution
+            tp_mask = (all_labels == 1)
+            if tp_mask.any():
+                tp_probs = probs[tp_mask]
+                print(f"[DIAG] TP probs: mean={tp_probs.mean():.4f}, median={np.median(tp_probs):.4f}, pct>0.5={(tp_probs>0.5).mean():.2f}")
+            else:
+                print("[DIAG] No positive labels in this validation set.")
 
             # Save per-class report only for best epoch
             report = classification_report(
@@ -1048,7 +1113,7 @@ def train(
 
 if __name__ == "__main__":
     mode = "partial"
-    loss_use = "hybrid"
+    loss_use = "asl-auto"
     import datetime
 
     wandb.init(
@@ -1061,6 +1126,7 @@ if __name__ == "__main__":
     train(
         finetune_mode=mode,
         loss=loss_use,
-        seed=2709
+        seed=2709,
+        epochs=8
     )
 
