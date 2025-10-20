@@ -467,6 +467,7 @@ def train(
     augment=True,
     loss = "hybrid",
     see_debug=False,
+    finetune_ratio=0.4,
     seed=None
 ):
     """
@@ -484,6 +485,8 @@ def train(
         device (str): Device to use (e.g. "cuda", "cpu").
         augment (bool): Whether to use data augmentation for training.
         loss (str): Whether to use focal loss. Options: "hybrid", "bce", "asl", "asl-auto"
+        see_debug (bool): Whether to print debug information.
+        finetune_ratio (float): Percentage of records to use for finetuning.
         seed (int): Random seed for reproducibility.
     Returns:
         None
@@ -516,7 +519,7 @@ def train(
     
     train_records, val_records, label_cols = build_finetune_subset(
         xml_dir, dicom_root, combined_groups, SPLIT_DIR,
-        finetune_ratio=0.4,
+        finetune_ratio=finetune_ratio,
         train_ratio=0.75,
         seed=seed if seed is not None else 42
     )
@@ -668,7 +671,7 @@ def train(
 
     # Loss function 
     if loss == "hybrid":
-        criterion = HybridLoss(alpha=pos_weight, gamma=gamma, bce_weight=0.6, focal_weight=0.4)
+        criterion = HybridLoss(alpha=pos_weight, gamma=gamma, bce_weight=0.8, focal_weight=0.2)
     elif loss == "focal":
         criterion = FocalBCEWithLogits(alpha=alpha_pos, gamma=gamma, reduction="mean")
     elif loss == "bce":
@@ -775,7 +778,7 @@ def train(
         dyn_pos_weight = (1 - epoch_factor) * torch.ones_like(pos_weight) + epoch_factor * pos_weight
 
         if loss == "hybrid":
-            criterion = HybridLoss(alpha=dyn_pos_weight, gamma=gamma, bce_weight=0.6, focal_weight=0.4)
+            criterion = HybridLoss(alpha=dyn_pos_weight, gamma=gamma, bce_weight=0.8, focal_weight=0.2)
         elif loss == "focal":
             criterion = FocalBCEWithLogits(alpha=alpha_pos, gamma=gamma, reduction="mean")
         elif loss == "bce":
@@ -1113,12 +1116,13 @@ def train(
 
 if __name__ == "__main__":
     mode = "partial"
-    loss_use = "asl-auto"
+    loss_use = "hybrid"
+    finetune_ratio = 0.4
     import datetime
 
     wandb.init(
         project="finetune-swin",
-        name="finetune-swin-labelaware-" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + f"-{mode}-{loss_use}",
+        name="finetune-swin-labelaware-" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + f"-{mode}-{loss_use}-{finetune_ratio}",
         group="finetune-swin",
         job_type="finetune",
     )
@@ -1127,6 +1131,6 @@ if __name__ == "__main__":
         finetune_mode=mode,
         loss=loss_use,
         seed=2709,
-        epochs=8
+        finetune_ratio=finetune_ratio
     )
 
