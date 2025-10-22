@@ -180,7 +180,7 @@ def make_multilabel_sampler(records):
     class_weights = (N / (class_counts_safe + eps)).astype(np.float32)  # shape (L,)
 
     # sample weights
-    sample_weights = labels.dot(class_weights)  # shape (N,)
+    sample_weights = labels.dot(class_weights) / (labels.sum(axis=1) + 1e-6)  # shape (N,)
     sample_weights = np.where(sample_weights > 0, sample_weights, np.min(sample_weights[sample_weights>0]) if np.any(sample_weights>0) else 1.0)
     
     # create sampler
@@ -725,7 +725,7 @@ def train(
     # Rebuild optimizer with discriminative LR
     param_groups = [{"params": head_params, "lr": chosen_lr}]
     if backbone_params:
-        param_groups.append({"params": backbone_params, "lr": chosen_lr * 0.01})
+        param_groups.append({"params": backbone_params, "lr": chosen_lr * 0.005})
 
     optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
@@ -737,7 +737,7 @@ def train(
     best_score = -float("inf")
     best_epoch = -1
     out_path_file = out_path / "finetuned_swin_labelaware.safetensors"
-    patience = cfg.patience
+    patience = cfg.patience * 2
     epochs_no_improve = 0
 
     if see_debug:
@@ -851,6 +851,7 @@ def train(
             optimizer_T.step(_closure)
             T_val = float(torch.exp(log_T).detach().cpu().item())
             T_val = max(T_val, 1.0)   # enforce at least 1.0; try 1.2 if negatives stay extreme
+            T_val = min(T_val, 1.2)
             print(f"[INFO] Calibrated temperature (clipped min=1.0): {T_val:.4f}")
         except Exception as e:
             print(f"[WARN] Temperature scaling failed: {e}")
@@ -866,7 +867,12 @@ def train(
         # ----- Metrics -----
         probs = calibrated_probs  # use calibrated version here
         # Compute best per-class thresholds for this epoch
-        best_thr = thresholds_min_precision(all_labels, probs, p_target=0.20, min_thr=0.02)
+        best_thr = np.zeros(probs.shape[1], dtype=float)
+        for c in range(probs.shape[1]):
+            p, r, t = precision_recall_curve(all_labels[:, c], probs[:, c])
+            f1s = 2 * p * r / (p + r + 1e-12)
+            best_idx = np.nanargmax(f1s)
+            best_thr[c] = t[best_idx] if best_idx < len(t) else 0.5
         best_thr = np.clip(best_thr, 0.02, 0.9)
 
         # Apply thresholds to get binary predictions
@@ -1117,7 +1123,7 @@ def train(
 if __name__ == "__main__":
     mode = "partial"
     loss_use = "hybrid"
-    finetune_ratio = 0.4
+    finetune_ratio = 0.7
     import datetime
 
     wandb.init(
@@ -1131,6 +1137,6 @@ if __name__ == "__main__":
         finetune_mode=mode,
         loss=loss_use,
         seed=2709,
-        finetune_ratio=finetune_ratio
+        finetune_ratio=finetune_ratio,
+        epochs=120
     )
-

@@ -304,13 +304,19 @@ if __name__ == '__main__':
     # Finetune SWIN 
     swin_ckpt_path = SWIN_FINETUNE_DIR
     swin_finetune_file = SWIN_FINETUNE_DIR / "finetuned_swin_labelaware.safetensors"
+    finetune_epochs = 120
+    finetune_data_ratio = 0.7
+
+    print(f"Finetuning SWIN with {finetune_epochs} epochs and {finetune_data_ratio} data ratio...")
     if not swin_finetune_file.exists():
         print("Finetuning SWIN...")
         swin_finetune(
             finetune_mode="partial",
             out_path=swin_ckpt_path,
             loss="hybrid",
-            seed=cfg.seed
+            seed=cfg.seed,
+            finetune_ratio=finetune_data_ratio,
+            epochs=finetune_epochs
         )
     else:
         print(f"Using cached Swin checkpoint at {swin_ckpt_path}")
