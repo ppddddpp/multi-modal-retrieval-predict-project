@@ -503,7 +503,7 @@ if __name__ == '__main__':
         num_heads=num_heads,
         fusion_type=FUSION_TYPE,
         img_backbone=image_backbone,
-        swin_ckpt_path=SWIN_FINETUNE_DIR / "finetuned_swin_labelaware.safetensors",
+        swin_ckpt_path= MODEL_DIR / "swin_checkpoint.safetensors", 
         bert_local_dir= MODEL_DIR / "clinicalbert_local",
         device=device,
         use_shared_ffn=cfg.use_shared_ffn,
@@ -511,7 +511,8 @@ if __name__ == '__main__':
         training=True,
         model_type="image"
     ).to(device)
-
+    # SWIN_FINETUNE_DIR / "finetuned_swin_labelaware.safetensors" 
+    
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
     total_steps = EPOCHS * len(train_loader)
     scheduler = get_cosine_schedule_with_warmup(
