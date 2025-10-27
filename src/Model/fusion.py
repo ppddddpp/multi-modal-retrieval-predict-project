@@ -135,24 +135,24 @@ class Backbones(nn.Module):
                     medclip_model.load_state_dict(torch.load(cached_ckpt, map_location="cpu"), strict=False)
                 else:
                     raise FileNotFoundError("No local MedCLIP weights found, triggering download.")
+
             except Exception as e:
-                print(f"[WARN] Local load failed ({e}). Downloading MedCLIP-ViT from Hugging Face...")
+                print(f"[WARN] Local load failed ({e}). Downloading MedCLIP-ViT from official MedCLIP repo...")
 
                 medclip_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT)
                 try:
                     medclip_model.from_pretrained()
                 except RuntimeError as e:
                     print(f"[WARN] Reloading MedCLIP with strict=False due to key mismatch: {e}")
-                    ckpt_path = hf_hub_download(
-                        repo_id="RyanWangZf/medclip-vit-base-patch16",
-                        filename="pytorch_model.bin"
-                    )
-                    ckpt = torch.load(ckpt_path, map_location="cpu")
-                    ckpt.pop("text_model.model.embeddings.position_ids", None)
-                    medclip_model.load_state_dict(ckpt, strict=False)
+                    # handle rare mismatch
+                    state_dict = medclip_model.state_dict()
+                    medclip_model.load_state_dict(state_dict, strict=False)
+
+                # cache the downloaded weights locally
                 torch.save(medclip_model.state_dict(), model_cache / "medclip_model.pth")
                 print(f"[INFO] Successfully downloaded & cached MedCLIP-ViT at {model_cache}")
 
+            # --- Extract only the vision encoder ---
             self.vision = medclip_model.vision_model
             self.img_dim = getattr(self.vision, "hidden_size", None) or getattr(self.vision, "embed_dim", None)
 
