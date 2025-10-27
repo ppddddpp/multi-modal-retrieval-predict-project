@@ -5,6 +5,7 @@ import timm
 from Helpers import load_hf_model_or_local, download_swin
 from safetensors.torch import load_file as load_safetensor
 from medclip import MedCLIPModel, MedCLIPVisionModelViT
+from huggingface_hub import hf_hub_download
 from pathlib import Path
 
 try:
@@ -134,29 +135,24 @@ class Backbones(nn.Module):
                     medclip_model.load_state_dict(torch.load(cached_ckpt, map_location="cpu"), strict=False)
                 else:
                     raise FileNotFoundError("No local MedCLIP weights found, triggering download.")
-
             except Exception as e:
                 print(f"[WARN] Local load failed ({e}). Downloading MedCLIP-ViT from Hugging Face...")
 
                 medclip_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT)
                 try:
-                    # Try normal load
                     medclip_model.from_pretrained()
                 except RuntimeError as e:
                     print(f"[WARN] Reloading MedCLIP with strict=False due to key mismatch: {e}")
-                    # Manual fallback
-                    ckpt = torch.hub.load_state_dict_from_url(
-                        "https://huggingface.co/RyanWangZf/medclip-vit-base-patch16/resolve/main/pytorch_model.bin",
-                        map_location="cpu"
+                    ckpt_path = hf_hub_download(
+                        repo_id="RyanWangZf/medclip-vit-base-patch16",
+                        filename="pytorch_model.bin"
                     )
-                    # Remove the offending key safely
+                    ckpt = torch.load(ckpt_path, map_location="cpu")
                     ckpt.pop("text_model.model.embeddings.position_ids", None)
                     medclip_model.load_state_dict(ckpt, strict=False)
-
                 torch.save(medclip_model.state_dict(), model_cache / "medclip_model.pth")
                 print(f"[INFO] Successfully downloaded & cached MedCLIP-ViT at {model_cache}")
 
-            # --- Extract only the vision encoder ---
             self.vision = medclip_model.vision_model
             self.img_dim = getattr(self.vision, "hidden_size", None) or getattr(self.vision, "embed_dim", None)
 
