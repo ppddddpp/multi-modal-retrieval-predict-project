@@ -4,7 +4,7 @@ import torch.nn as nn
 import timm
 from Helpers import load_hf_model_or_local, download_swin
 from safetensors.torch import load_file as load_safetensor
-from medclip import MedCLIPModel, MedCLIPVisionModel
+from medclip import MedCLIPModel, MedCLIPVisionModelViT
 from pathlib import Path
 
 try:
@@ -122,7 +122,6 @@ class Backbones(nn.Module):
                 raise ValueError(f"Unknown cnn_model_name {cnn_model_name}")
 
         elif img_backbone == "medclip":
-            from medclip import MedCLIPModel, MedCLIPVisionModelViT
             model_cache = MODEL_PLACE / "medclip"
             model_cache.mkdir(parents=True, exist_ok=True)
             print(f"[INFO] Using MedCLIP as image backbone (cache: {model_cache})")
@@ -132,13 +131,28 @@ class Backbones(nn.Module):
                 if cached_ckpt.exists():
                     print(f"[INFO] Found cached MedCLIP weights in {cached_ckpt}")
                     medclip_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT)
-                    medclip_model.load_state_dict(torch.load(cached_ckpt, map_location="cpu"))
+                    medclip_model.load_state_dict(torch.load(cached_ckpt, map_location="cpu"), strict=False)
                 else:
                     raise FileNotFoundError("No local MedCLIP weights found, triggering download.")
+
             except Exception as e:
                 print(f"[WARN] Local load failed ({e}). Downloading MedCLIP-ViT from Hugging Face...")
+
                 medclip_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT)
-                medclip_model.from_pretrained()  # auto-download from HF
+                try:
+                    # Try normal load
+                    medclip_model.from_pretrained()
+                except RuntimeError as e:
+                    print(f"[WARN] Reloading MedCLIP with strict=False due to key mismatch: {e}")
+                    # Manual fallback
+                    ckpt = torch.hub.load_state_dict_from_url(
+                        "https://huggingface.co/RyanWangZf/medclip-vit-base-patch16/resolve/main/pytorch_model.bin",
+                        map_location="cpu"
+                    )
+                    # Remove the offending key safely
+                    ckpt.pop("text_model.model.embeddings.position_ids", None)
+                    medclip_model.load_state_dict(ckpt, strict=False)
+
                 torch.save(medclip_model.state_dict(), model_cache / "medclip_model.pth")
                 print(f"[INFO] Successfully downloaded & cached MedCLIP-ViT at {model_cache}")
 
@@ -159,6 +173,7 @@ class Backbones(nn.Module):
             self.img_dim = dim
 
             print(f"[INFO] Auto-detected MedCLIP vision embedding dim: {self.img_dim}")
+
 
         else:
             raise ValueError(f"Unknown image backbone: {img_backbone}")
