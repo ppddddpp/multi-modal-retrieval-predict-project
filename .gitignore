@@ -199,6 +199,7 @@ splited_data_old
 label attention model
 label attention model temp
 retrieval_diversity_score
+pretrained
 
 # Local information
 step.txt

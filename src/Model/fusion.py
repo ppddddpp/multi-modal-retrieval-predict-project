@@ -4,6 +4,7 @@ import torch.nn as nn
 import timm
 from Helpers import load_hf_model_or_local, download_swin
 from safetensors.torch import load_file as load_safetensor
+from medclip import MedCLIPModel, MedCLIPVisionModel
 from pathlib import Path
 
 try:
@@ -120,8 +121,47 @@ class Backbones(nn.Module):
             else:
                 raise ValueError(f"Unknown cnn_model_name {cnn_model_name}")
 
+        elif img_backbone == "medclip":
+            from medclip import MedCLIPModel, MedCLIPVisionModelViT
+            model_cache = MODEL_PLACE / "medclip"
+            model_cache.mkdir(parents=True, exist_ok=True)
+            print(f"[INFO] Using MedCLIP as image backbone (cache: {model_cache})")
+
+            try:
+                cached_ckpt = model_cache / "medclip_model.pth"
+                if cached_ckpt.exists():
+                    print(f"[INFO] Found cached MedCLIP weights in {cached_ckpt}")
+                    medclip_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT)
+                    medclip_model.load_state_dict(torch.load(cached_ckpt, map_location="cpu"))
+                else:
+                    raise FileNotFoundError("No local MedCLIP weights found, triggering download.")
+            except Exception as e:
+                print(f"[WARN] Local load failed ({e}). Downloading MedCLIP-ViT from Hugging Face...")
+                medclip_model = MedCLIPModel(vision_cls=MedCLIPVisionModelViT)
+                medclip_model.from_pretrained()  # auto-download from HF
+                torch.save(medclip_model.state_dict(), model_cache / "medclip_model.pth")
+                print(f"[INFO] Successfully downloaded & cached MedCLIP-ViT at {model_cache}")
+
+            # --- Extract only the vision encoder ---
+            self.vision = medclip_model.vision_model
+            self.img_dim = getattr(self.vision, "hidden_size", None) or getattr(self.vision, "embed_dim", None)
+
+            # Try to infer embedding dimension automatically
+            dummy = torch.randn(1, 3, 224, 224)
+            with torch.no_grad():
+                out = self.vision(dummy)
+            if isinstance(out, dict) and "last_hidden_state" in out:
+                dim = out["last_hidden_state"].shape[-1]
+            elif isinstance(out, torch.Tensor):
+                dim = out.shape[-1] if out.dim() >= 2 else out.shape[1]
+            else:
+                dim = 512  # safe fallback
+            self.img_dim = dim
+
+            print(f"[INFO] Auto-detected MedCLIP vision embedding dim: {self.img_dim}")
+
         else:
-            raise ValueError(f"Unknown img_backbone {img_backbone}")
+            raise ValueError(f"Unknown image backbone: {img_backbone}")
         
         self.swin = self.vision
         if hasattr(self.swin, "norm") and isinstance(getattr(self.swin, "norm"), nn.Module):
@@ -229,6 +269,35 @@ class Backbones(nn.Module):
                     img_patches = feats.unsqueeze(1)                      # (B, 1, D)
                 else:
                     raise ValueError(f"Unexpected CNN output shape: {feats.shape}")
+                
+            elif self.img_backbone == "medclip":
+                vision_outputs = self.vision(image)
+
+                if isinstance(vision_outputs, dict):
+                    img_global = vision_outputs.get("pooler_output", None)
+                    if img_global is None and "last_hidden_state" in vision_outputs:
+                        last_hidden = vision_outputs["last_hidden_state"]
+                        img_global = last_hidden.mean(dim=1)  # global average pooling
+                        img_patches = last_hidden  # patch-level tokens
+                    else:
+                        img_patches = vision_outputs.get("last_hidden_state", None)
+                elif isinstance(vision_outputs, (list, tuple)):
+                    img_global = vision_outputs[0].mean(dim=1)
+                    img_patches = vision_outputs[0]
+                elif isinstance(vision_outputs, torch.Tensor):
+                    if vision_outputs.dim() == 3:
+                        img_patches = vision_outputs
+                        img_global = vision_outputs.mean(dim=1)
+                    elif vision_outputs.dim() == 2:
+                        img_global = vision_outputs
+                        img_patches = vision_outputs.unsqueeze(1)
+                    else:
+                        raise ValueError(f"Unexpected MedCLIP output shape: {vision_outputs.shape}")
+                else:
+                    raise ValueError(f"Unexpected MedCLIP output type: {type(vision_outputs)}")
+
+                if img_patches is not None:
+                    img_patches = self.swin_norm(img_patches)
 
         txt_feats = None
         if input_ids is not None:

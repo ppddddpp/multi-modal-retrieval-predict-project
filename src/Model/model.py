@@ -167,7 +167,7 @@ class MultiModalRetrievalModel(nn.Module):
             use_shared_ffn (bool, optional): whether to use a shared FFN across fusion layers. Defaults to True.
             num_fusion_layers (int, optional): number of fusion layers to use. Defaults to 3.
             fusion_type (str, optional): type of fusion module to use; one of "cross", "simple", "gated". Defaults to "cross".
-            img_backbone (str, optional): type of image backbone to use; one of "swin", "cnn". Defaults to "swin".
+            img_backbone (str, optional): type of image backbone to use; one of "swin", "cnn", "medclip". Defaults to "swin".
             swin_name (str, optional): name of the Swin transformer model to use. Defaults to "swin_base_patch4_window7_224".
             cnn_name (str, optional): name of the CNN model to use. Defaults to "resnet50".
             bert_name (str, optional): name of the ClinicalBERT model to use. Defaults to "emilyalsentzer/Bio_ClinicalBERT".
