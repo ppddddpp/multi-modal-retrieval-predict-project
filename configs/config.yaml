@@ -57,4 +57,4 @@ la_bce_weight: 0.1
 pos_weight_clamp_max: 5.0
 
 # Wandb parameters
-project_name: "multimodal-disease-classification-1510-experiments"
+project_name: "multimodal-disease-classification-1410-experiments"
